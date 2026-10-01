@@ -476,7 +476,7 @@ def tiktok_video_message(config: TikTokConfig, account: str, video: dict) -> dic
     if caption:
         embed["description"] = _cut(escape(caption), 4096)
     if video.get("cover"):
-        embed["thumbnail"] = {"url": video["cover"]}
+        embed["image"] = {"url": video["cover"]}  # full width under the caption, not the small corner thumbnail
     return _tiktok_payload(config, embed, video.get("url") or TIKTOK_PROFILE_URL.format(account.lower()))
 
 

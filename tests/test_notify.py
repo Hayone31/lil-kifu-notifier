@@ -427,7 +427,7 @@ def test_tiktok_official_api_posts_caption_cover_and_link():
     assert run() == ["BeagleMommy uploaded a new TikTok"]
     assert hook.sent == [{
         "embeds": [{"title": "BeagleMommy uploaded a new TikTok!", "color": 0xDB4263,
-                    "description": r"Boss\_fight \*clip\*", "thumbnail": {"url": "https://cdn/cover2.jpg"}}],
+                    "description": r"Boss\_fight \*clip\*", "image": {"url": "https://cdn/cover2.jpg"}}],
         "components": [{"type": 1, "components": [{"type": 2, "style": 5, "label": "View on TikTok",
                                                    "url": "https://www.tiktok.com/@beaglemommy/video/7600000000000000002"}]}],
         "allowed_mentions": {"parse": []},
@@ -437,7 +437,7 @@ def test_tiktok_official_api_posts_caption_cover_and_link():
     assert run() == []
     api.videos += [video(n) for n in range(3, 9)]  # a burst after an outage: only the newest three are posted
     assert run() == ["BeagleMommy uploaded a new TikTok"] * 3
-    assert [p["embeds"][0]["thumbnail"]["url"] for p in hook.sent[-3:]] == [f"https://cdn/cover{n}.jpg" for n in (6, 7, 8)]
+    assert [p["embeds"][0]["image"]["url"] for p in hook.sent[-3:]] == [f"https://cdn/cover{n}.jpg" for n in (6, 7, 8)]
     assert run() == []
 
 
@@ -542,7 +542,7 @@ def test_urlebird_and_oembed_post_caption_cover_and_link():
     assert run() == ["BeagleMommy uploaded a new TikTok"]
     [post] = hook.sent
     assert post["embeds"][0] == {"title": "BeagleMommy uploaded a new TikTok!", "color": 0xDB4263,
-                                 "description": "clip 2", "thumbnail": {"url": "https://cdn/cover2.jpg"}}
+                                 "description": "clip 2", "image": {"url": "https://cdn/cover2.jpg"}}
     assert post["components"][0]["components"][0]["url"] == f"https://www.tiktok.com/@beaglemommy/video/{video(2)['id']}"
     assert video(3)["id"] in state["tiktok"]["beaglemommy"]["seen"]  # skipped, not retried
 
@@ -752,7 +752,7 @@ def test_main_finds_new_tiktoks_through_urlebird(repo, apis, monkeypatch):
     [post] = webhook_posts(apis, 2)
     assert post["embeds"][0] == {"title": "BeagleMommy uploaded a new TikTok!", "color": 0xDB4263,
                                  "description": "caption of 7690000000000000001",
-                                 "thumbnail": {"url": "https://cdn/7690000000000000001.jpg"}}
+                                 "image": {"url": "https://cdn/7690000000000000001.jpg"}}
     assert post["components"][0]["components"][0]["url"] == "https://www.tiktok.com/@beaglemommy/video/7690000000000000001"
     assert post["username"] == "Lil Nao" and post["allowed_mentions"] == {"parse": []}
 
