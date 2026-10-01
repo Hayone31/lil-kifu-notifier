@@ -274,6 +274,28 @@ def test_webhook_url():
         notify.Webhook("https://example.com/api/webhooks/123/abc")
 
 
+def test_webhook_url_paste_mistakes_are_forgiven():
+    for raw in ('"https://discord.com/api/webhooks/123/abc"', " https://discord.com/api/webhooks/123/abc \n",
+                "DISCORD_TIKTOK_WEBHOOK_URL=https://discord.com/api/webhooks/123/abc",
+                "https://discord.com/api/webhooks/123/abc?thread_id=5"):
+        assert notify.Webhook(raw).base == "https://discord.com/api/v10/webhooks/123/abc"
+
+
+@pytest.mark.parametrize("raw, hint", [
+    ("", "empty"),
+    ("https://discord.com/api/webhooks/123/a b", "spaces"),
+    ("discord.com/api/webhooks/123/abc", "https://"),
+    ("https://discord.com/channels/1/2", "isn't a webhook link"),
+    ("https://discord.com/api/webhooks/abc", "<number>/<token>"),
+])
+def test_bad_webhook_urls_are_explained_without_echoing_them(raw, hint):
+    with pytest.raises(ConfigError) as info:
+        notify.Webhook(raw, "DISCORD_TIKTOK_WEBHOOK_URL")
+    message = str(info.value)
+    assert hint in message and message.startswith("DISCORD_TIKTOK_WEBHOOK_URL is not")
+    assert not raw or raw.strip() not in message
+
+
 def test_webhook_token_never_appears_in_errors():
     assert notify._redact("https://discord.com/api/v10/webhooks/1/s3cret/messages/2?with_components=true") == (
         "https://discord.com/api/v10/webhooks/1/***/messages/2?with_components=true")

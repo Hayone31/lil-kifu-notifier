@@ -189,9 +189,11 @@ def tiktok_profile(handle: str) -> dict:
 
 class Webhook:
     def __init__(self, url: str, secret_name: str = "DISCORD_WEBHOOK_URL") -> None:
-        match = _WEBHOOK_RE.fullmatch(url.strip())
+        url = _clean_webhook_url(url)
+        match = _WEBHOOK_RE.fullmatch(url)
         if not match:
-            raise ConfigError(f"{secret_name} is not a Discord webhook URL")
+            raise ConfigError(f"{secret_name} is not a Discord webhook URL: {_webhook_hint(url)}. Copy it again "
+                              "from Discord (channel settings > Integrations > Webhooks > Copy Webhook URL)")
         self.secret_name = secret_name
         self.base = f"{DISCORD_API}/webhooks/{match[1]}/{match[2]}"
 
@@ -200,6 +202,27 @@ class Webhook:
 
     def edit(self, message_id: str, payload: dict) -> None:
         http("PATCH", f"{self.base}/messages/{message_id}?with_components=true", json_body=payload)
+
+
+def _clean_webhook_url(raw: str) -> str:
+    """Forgive common paste mistakes: quotes, a leading NAME=, a query string."""
+    url = raw.strip().strip("\"'").strip()
+    if "=" in url.split("://", 1)[0]:
+        url = url.split("=", 1)[1].strip().strip("\"'").strip()
+    return url.split("?", 1)[0].split("#", 1)[0]
+
+
+def _webhook_hint(url: str) -> str:
+    """Say what is wrong without ever echoing the secret itself."""
+    if not url:
+        return "it is empty"
+    if any(char.isspace() for char in url):
+        return "it contains spaces or line breaks"
+    if not url.startswith("https://"):
+        return "it doesn't start with https://"
+    if "/api/webhooks/" not in url and "/api/v" not in url:
+        return "it isn't a webhook link (those contain /api/webhooks/)"
+    return "the part after /api/webhooks/ should be <number>/<token>"
 
 
 # --- Settings and state -------------------------------------------------------------------------
