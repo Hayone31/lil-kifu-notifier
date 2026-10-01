@@ -85,6 +85,9 @@ Twitch's Watch Stream button.
     also confirms that the video belongs to the right account, so videos of other accounts that
     show up on the page are never announced.
   - It posts at most 3 videos per check.
+  - Under the cover, a post shows the video's likes and comments (from urlebird's page). A brand-new
+    video has hardly any yet, so the post is updated 1, 3, 6 and 24 hours after it went up. The
+    message is only edited when the numbers changed.
   - urlebird is an unofficial site. If it stops answering, Lil Nao falls back to the video count on
     the account's public TikTok profile and posts "uploaded a new TikTok" with the profile picture
     and a profile link.

@@ -45,6 +45,8 @@ RESTART_GAP = timedelta(minutes=10)  # a new stream this soon after the last one
 TIKTOK_EVERY = 15                    # minutes between TikTok checks; TikTok blocks clients that ask often
 SEEN_KEEP = 30                       # video ids remembered per TikTok account
 MAX_POSTS_PER_CHECK = 3              # never flood the channel, e.g. after a long outage
+# A new video has hardly any likes yet, so its post is updated this long after posting.
+STATS_REFRESH = (timedelta(hours=1), timedelta(hours=3), timedelta(hours=6), timedelta(hours=24))
 KEEPALIVE = timedelta(days=25)       # commit at least this often; GitHub pauses idle schedules after 60 days
 UNKNOWN_WEBHOOK, UNKNOWN_MESSAGE = 10015, 10008  # Discord error codes
 
@@ -181,7 +183,42 @@ def urlebird_videos(handle: str) -> list[dict]:
     if f"@{handle.lower()}" not in html.lower():
         raise TikTokError("urlebird answered with an unexpected page (blocked or changed?)")
     ids = sorted({int(found) for found in re.findall(r'/video/[^"\'\s>]*?(\d{18,20})', html)}, reverse=True)
-    return [{"id": str(video_id), "created": video_id >> 32} for video_id in ids]
+    stats = _urlebird_stats(html)
+    return [{"id": str(video_id), "created": video_id >> 32, **({"stats": stats[str(video_id)]} if str(video_id) in stats else {})}
+            for video_id in ids]
+
+
+def _urlebird_stats(html: str) -> dict[str, dict]:
+    """Likes, comments, views and shares per video id, from the page's schema.org data."""
+    names = {"LikeAction": "likes", "CommentAction": "comments", "WatchAction": "views", "ShareAction": "shares"}
+    found: dict[str, dict] = {}
+    for block in re.findall(r'<script[^>]+application/ld\+json[^>]*>(.*?)</script>', html, re.S):
+        try:
+            data = json.loads(block)
+        except ValueError:
+            continue
+        pending = [data]
+        while pending:
+            item = pending.pop()
+            if isinstance(item, list):
+                pending.extend(item)
+                continue
+            if not isinstance(item, dict):
+                continue
+            pending.extend(item.values())
+            video_id = re.search(r"(\d{18,20})/?$", str(item.get("url", ""))) if item.get("@type") == "VideoObject" else None
+            if not video_id:
+                continue
+            counts = {}
+            for counter in item.get("interactionStatistic") or []:
+                kind = counter.get("interactionType") if isinstance(counter, dict) else None
+                kind = kind.get("@type") if isinstance(kind, dict) else kind
+                name = names.get(str(kind).rsplit("/", 1)[-1])
+                if name and isinstance(counter.get("userInteractionCount"), int):
+                    counts[name] = counter["userInteractionCount"]
+            if counts:
+                found[video_id[1]] = counts
+    return found
 
 
 def tiktok_video_details(handle: str, video: dict) -> dict | None:
@@ -470,14 +507,30 @@ def tiktok_message(config: TikTokConfig, account: str, avatar: str, new_posts: i
 
 
 def tiktok_video_message(config: TikTokConfig, account: str, video: dict) -> dict:
-    """With TikTok's official API: the video's caption, cover and a direct link."""
+    """The video's caption, cover, like and comment counts, and a direct link."""
+    return _tiktok_payload(config, tiktok_video_embed(account, video),
+                           video.get("url") or TIKTOK_PROFILE_URL.format(account.lower()))
+
+
+def tiktok_video_embed(account: str, video: dict) -> dict:
     embed = {"title": _cut(f"{account} uploaded a new TikTok!", 256), "color": TIKTOK_RED}
     caption = (video.get("caption") or "").strip()
     if caption:
         embed["description"] = _cut(escape(caption), 4096)
     if video.get("cover"):
         embed["image"] = {"url": video["cover"]}  # full width under the caption, not the small corner thumbnail
-    return _tiktok_payload(config, embed, video.get("url") or TIKTOK_PROFILE_URL.format(account.lower()))
+    stats = video.get("stats") or {}
+    if "likes" in stats or "comments" in stats:  # shown under the cover
+        embed["footer"] = {"text": f"❤️ {compact(stats.get('likes', 0))} · 💬 {compact(stats.get('comments', 0))}"}
+    return embed
+
+
+def compact(number: int) -> str:
+    """1234 -> 1.2K, 1500000 -> 1.5M"""
+    for size, suffix in ((1_000_000_000, "B"), (1_000_000, "M"), (1_000, "K")):
+        if number >= size:
+            return f"{number / size:.1f}".rstrip("0").rstrip(".") + suffix
+    return str(number)
 
 
 def _tiktok_payload(config: TikTokConfig, embed: dict, link: str) -> dict:
@@ -637,11 +690,12 @@ def tiktok_videos(api: str, handle: str) -> list[dict] | None:
 
 
 def announce_videos(config: TikTokConfig, entry: dict, account: str, videos: list[dict], webhook: Webhook,
-                    details=None) -> list[str]:
+                    details=None, now: datetime | None = None) -> list[str]:
     """Post the videos that weren't there last time. The first look only remembers what is there.
 
     details(video) fills in caption, cover and link when the list only has ids; it returns None for
-    a video that turns out to belong to another account.
+    a video that turns out to belong to another account. Posts that show like and comment counts
+    are remembered (with now) so refresh_tiktok_stats can update those counts later.
     """
     entry.pop("video_count", None)  # if this source goes away, counting starts fresh instead of re-announcing
     ids = [video["id"] for video in videos]
@@ -669,15 +723,56 @@ def announce_videos(config: TikTokConfig, entry: dict, account: str, videos: lis
             if not video:
                 continue  # someone else's video on the page
         try:
-            webhook.send(tiktok_video_message(config, account, video))
+            message_id = webhook.send(tiktok_video_message(config, account, video))
         except HttpError as e:
             _raise_if_webhook_gone(e, webhook)
             warn(f"TikTok @{account}: {e} (trying again later)")
             failed.add(video["id"])
             continue
         changes.append(f"{account} uploaded a new TikTok")
+        if now is not None and video.get("stats"):
+            entry.setdefault("posted", []).append(
+                {"id": video["id"], "message_id": message_id, "posted_at": iso(now), "stats": video["stats"], "refreshes": 0})
     entry["seen"] = ([i for i in ids if i not in failed] + [i for i in seen if i not in ids])[:SEEN_KEEP]
     return changes
+
+
+def refresh_tiktok_stats(entry: dict, account: str, videos: list[dict], webhook: Webhook, now: datetime,
+                         details) -> None:
+    """Update the like and comment counts of recent posts 1, 3, 6 and 24 hours after posting."""
+    listed = {video["id"]: video for video in videos}
+    following = []
+    for post in entry.get("posted", []):
+        done, age = post.get("refreshes", 0), now - parse_time(post["posted_at"])
+        if done >= len(STATS_REFRESH) or age > STATS_REFRESH[-1] + timedelta(hours=6):
+            continue  # all updates done, or the video stayed off the page: stop following it
+        following.append(post)
+        video = listed.get(post["id"])
+        if age < STATS_REFRESH[done] or not video or not video.get("stats"):
+            continue
+        if video["stats"] != post.get("stats"):
+            try:
+                described = details(video)  # fresh caption, cover link (TikTok's links expire) and post link
+            except (HttpError, urllib.error.URLError, TimeoutError, ValueError) as e:
+                warn(f"TikTok @{account}: couldn't refresh the counts ({e}); trying again later")
+                continue
+            if not described:
+                continue
+            try:
+                webhook.edit(post["message_id"], {"embeds": [tiktok_video_embed(account, described)]})
+            except HttpError as e:
+                if e.discord_code == UNKNOWN_MESSAGE:
+                    following.pop()  # someone deleted the post
+                    continue
+                _raise_if_webhook_gone(e, webhook)
+                warn(f"TikTok @{account}: couldn't refresh the counts ({e}); trying again later")
+                continue
+            post["stats"] = video["stats"]
+        post["refreshes"] = done + 1
+    if following:
+        entry["posted"] = following
+    else:
+        entry.pop("posted", None)
 
 
 def check_tiktok(config: TikTokConfig, state: dict, webhook: Webhook, now: datetime, *,
@@ -714,8 +809,10 @@ def check_tiktok(config: TikTokConfig, state: dict, webhook: Webhook, now: datet
         except (HttpError, urllib.error.URLError, TimeoutError, TikTokError, ValueError) as e:
             warn(f"TikTok @{handle}: urlebird isn't answering ({e}); counting videos instead")
         else:
-            changes += announce_videos(config, entries.setdefault(handle, {}), account, listed, webhook,
-                                       details=lambda video, handle=handle: details(handle, video))
+            describe = lambda video, handle=handle: details(handle, video)
+            entry = entries.setdefault(handle, {})
+            refresh_tiktok_stats(entry, account, listed, webhook, now, describe)
+            changes += announce_videos(config, entry, account, listed, webhook, details=describe, now=now)
             continue
         try:
             profile = fetch(handle)

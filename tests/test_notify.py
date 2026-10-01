@@ -477,7 +477,17 @@ def test_switching_between_api_and_counting_never_reannounces():
     assert state["tiktok"]["beaglemommy"] == {"video_count": 110} and hook.sent == []
 
 
-URLEBIRD_PAGE = """<html><head><title>Renaissance Guild WWM (@renaissance.guild) - Urlebird</title></head><body>
+def counter(kind, count):
+    return {"@type": "InteractionCounter", "interactionType": {"@type": f"http://schema.org/{kind}"},
+            "userInteractionCount": count}
+
+
+URLEBIRD_JSON_LD = json.dumps({"@context": "https://schema.org", "@type": "ItemList", "itemListElement": [
+    {"position": "1", "@type": "VideoObject", "url": "https://urlebird.com/video/more-than-a-guild-7686796925315697952/",
+     "interactionStatistic": [counter("WatchAction", 561), counter("LikeAction", 28), counter("CommentAction", 7),
+                              counter("ShareAction", 18)]}]})
+URLEBIRD_PAGE = f"""<html><head><title>Renaissance Guild WWM (@renaissance.guild) - Urlebird</title>
+<script type="application/ld+json">{URLEBIRD_JSON_LD}</script></head><body>
 <a href="https://urlebird.com/video/more-than-a-guild-7686796925315697952/">More than a guild</a>
 <a href='https://urlebird.com/video/first-post-7600000000000000001/'><img></a>
 <a href="https://urlebird.com/user/renaissance.guild/">profile</a></body></html>"""
@@ -489,6 +499,8 @@ def test_urlebird_page_parsing(monkeypatch):
     videos = notify.urlebird_videos("renaissance.guild")
     assert [v["id"] for v in videos] == ["7686796925315697952", "7600000000000000001"]  # newest first
     assert datetime.fromtimestamp(videos[0]["created"], timezone.utc).date().isoformat() == "2026-09-18"
+    assert videos[0]["stats"] == {"views": 561, "likes": 28, "comments": 7, "shares": 18}
+    assert "stats" not in videos[1]
     page = "<html><title>Just a moment...</title></html>"  # e.g. a bot check instead of the profile
     with pytest.raises(notify.TikTokError, match="unexpected page"):
         notify.urlebird_videos("renaissance.guild")
@@ -561,6 +573,51 @@ def test_urlebird_down_falls_back_to_counting(capsys):
     assert notify.check_tiktok(TIKTOK_CONFIG, state, hook, ON_TIME, fetch=counts, list_videos=listing) == []
     assert state["tiktok"]["beaglemommy"] == {"video_count": 104}
     assert "urlebird isn't answering" in capsys.readouterr().out
+
+
+def test_tiktok_footer_shows_likes_and_comments():
+    embed = notify.tiktok_video_embed("X", {"caption": "c", "stats": {"likes": 28, "comments": 7, "views": 561}})
+    assert embed["footer"] == {"text": "❤️ 28 · 💬 7"}
+    assert "footer" not in notify.tiktok_video_embed("X", {"caption": "c"})
+    assert [notify.compact(n) for n in (0, 999, 1000, 1234, 15300, 1_500_000, 2_000_000_000)] == [
+        "0", "999", "1K", "1.2K", "15.3K", "1.5M", "2B"]
+
+
+def test_counts_are_refreshed_after_1_3_6_and_24_hours():
+    state, hook = {"streams": {}, "tiktok": {"beaglemommy": {"seen": [video(1)["id"]]}}}, FakeWebhook()
+    stats = {"likes": 0, "comments": 0}
+    listing = lambda handle: [{"id": video(n)["id"], "created": video(n)["created"], "stats": dict(stats)} for n in (2, 1)]
+    covers = iter(range(100))
+
+    def details(handle, item):
+        return {**item, "caption": "clip", "cover": f"https://cdn/fresh{next(covers)}.jpg",
+                "url": f"https://www.tiktok.com/@beaglemommy/video/{item['id']}"}
+
+    t0 = datetime(2026, 10, 1, 12, 0, tzinfo=timezone.utc)
+    run = lambda at: notify.check_tiktok(TIKTOK_CONFIG, state, hook, at, force=True, fetch=FakeTikTok(),
+                                         list_videos=listing, details=details)
+    assert run(t0) == ["BeagleMommy uploaded a new TikTok"]
+    assert hook.sent[0]["embeds"][0]["footer"] == {"text": "❤️ 0 · 💬 0"}
+    [post] = state["tiktok"]["beaglemommy"]["posted"]
+    assert (post["message_id"], post["refreshes"]) == ("101", 0)
+
+    stats.update(likes=12, comments=3)
+    run(t0 + timedelta(minutes=30))
+    assert hook.edits == []  # too early
+    run(t0 + timedelta(hours=1))
+    [(message_id, payload)] = hook.edits
+    assert message_id == "101" and payload["embeds"][0]["footer"] == {"text": "❤️ 12 · 💬 3"}
+    assert payload["embeds"][0]["image"]["url"] == "https://cdn/fresh1.jpg"  # a fresh cover link
+    run(t0 + timedelta(hours=3))  # nothing changed: no edit, but the 3-hour update is done
+    assert len(hook.edits) == 1 and state["tiktok"]["beaglemommy"]["posted"][0]["refreshes"] == 2
+    stats.update(likes=1500)
+    run(t0 + timedelta(hours=6))
+    assert hook.edits[-1][1]["embeds"][0]["footer"] == {"text": "❤️ 1.5K · 💬 3"}
+    hook.fail_edit = HttpError(404, json.dumps({"code": notify.UNKNOWN_MESSAGE}), "x")  # someone deleted the post
+    stats.update(likes=2000)
+    run(t0 + timedelta(hours=24))
+    assert "posted" not in state["tiktok"]["beaglemommy"]
+    assert len(hook.sent) == 1
 
 
 def test_tiktok_videos_asks_the_panel(monkeypatch):
@@ -654,7 +711,11 @@ def apis():
                 if tiktok.urlebird is None:
                     return self.reply(404, None)
                 links = "".join(f'<a href="https://urlebird.com/video/clip-{i}/">x</a>' for i in tiktok.urlebird)
-                return self.reply(200, f"<title>Brandy (@beaglemommy) - Urlebird</title>{links}", "text/html")
+                ld = json.dumps({"@type": "ItemList", "itemListElement": [
+                    {"@type": "VideoObject", "url": f"https://urlebird.com/video/clip-{i}/",
+                     "interactionStatistic": [counter("LikeAction", 5), counter("CommentAction", 2)]} for i in tiktok.urlebird]})
+                page = f'<title>Brandy (@beaglemommy) - Urlebird</title><script type="application/ld+json">{ld}</script>{links}'
+                return self.reply(200, page, "text/html")
             if self.path.startswith("/oembed?url="):
                 video_id = parse_qs(urlparse(self.path).query)["url"][0].rsplit("/", 1)[1]
                 return self.reply(200, {"author_unique_id": "beaglemommy", "title": f"caption of {video_id}",
@@ -752,9 +813,12 @@ def test_main_finds_new_tiktoks_through_urlebird(repo, apis, monkeypatch):
     [post] = webhook_posts(apis, 2)
     assert post["embeds"][0] == {"title": "BeagleMommy uploaded a new TikTok!", "color": 0xDB4263,
                                  "description": "caption of 7690000000000000001",
-                                 "image": {"url": "https://cdn/7690000000000000001.jpg"}}
+                                 "image": {"url": "https://cdn/7690000000000000001.jpg"},
+                                 "footer": {"text": "❤️ 5 · 💬 2"}}
     assert post["components"][0]["components"][0]["url"] == "https://www.tiktok.com/@beaglemommy/video/7690000000000000001"
     assert post["username"] == "Lil Nao" and post["allowed_mentions"] == {"parse": []}
+    [followed] = json.loads((repo / "state.json").read_text(encoding="utf-8"))["tiktok"]["beaglemommy"]["posted"]
+    assert (followed["id"], followed["message_id"], followed["stats"]) == ("7690000000000000001", "777", {"likes": 5, "comments": 2})
 
 
 def test_main_with_tiktoks_official_api(repo, apis, monkeypatch):
