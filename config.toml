@@ -18,7 +18,9 @@ watch_button = true
 [tiktok]
 # Lil Nao announces new posts from these TikTok accounts. Write each name the way it should
 # appear in Discord, e.g. "BeagleMommy". Accounts are checked about every 15 minutes.
-accounts = []
+accounts = [
+    "renaissance.guild",
+]
 ping = ""
 name = "Lil Nao"
 avatar_url = ""
