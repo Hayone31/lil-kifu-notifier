@@ -221,9 +221,12 @@ async function getFile(env, path) {
 }
 
 async function putFile(env, path, text, sha, commitMessage) {
+  if (!env.COMMIT_EMAIL) throw new Error("COMMIT_EMAIL isn't set, so the commit would show the owner's real email");
+  // Without an explicit identity GitHub signs API commits with the account's primary email, and this repo is public.
+  const identity = { name: "Lil Kifu panel", email: env.COMMIT_EMAIL };
   const response = await github(env, `contents/${path}`, {
     method: "PUT",
-    body: JSON.stringify({ message: commitMessage, content: toBase64(text), sha, branch: "main" }),
+    body: JSON.stringify({ message: commitMessage, content: toBase64(text), sha, branch: "main", author: identity, committer: identity }),
   });
   checkToken(response);
   if (response.status === 409 || response.status === 422) return false; // changed by someone else first
@@ -274,6 +277,8 @@ let cachedKey = { hex: null, key: null };
 
 export async function verifySignature(publicKeyHex, signatureHex, timestamp, body) {
   if (!publicKeyHex || !signatureHex || !timestamp) return false;
+  // A genuine request is fresh; a captured one replayed later is not.
+  if (!(Math.abs(Date.now() / 1000 - Number(timestamp)) <= 300)) return false;
   try {
     if (cachedKey.hex !== publicKeyHex) {
       cachedKey = { hex: publicKeyHex, key: await crypto.subtle.importKey("raw", hexToBytes(publicKeyHex), { name: "Ed25519" }, false, ["verify"]) };

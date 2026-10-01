@@ -12,6 +12,8 @@ crons = ["*/5 * * * *"]
 
 [vars]
 GITHUB_REPO = "Hayone31/lil-kifu-notifier"
+# Commits from the panel use the account's private GitHub noreply address, never its real email.
+COMMIT_EMAIL = "295453757+Hayone31@users.noreply.github.com"
 
 # TikTok access tokens, one-time connect links and short-lived copies of video lists.
 [[kv_namespaces]]

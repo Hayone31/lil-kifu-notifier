@@ -59,6 +59,7 @@ const publicKey = Buffer.from(await crypto.subtle.exportKey("raw", keys.publicKe
 const ENV = {
   DISCORD_PUBLIC_KEY: publicKey, ALLOWED_GUILD_IDS: "111, 222", GITHUB_REPO: "owner/repo",
   GITHUB_TOKEN: "gh-token", TWITCH_CLIENT_ID: "cid", TWITCH_CLIENT_SECRET: "secret",
+  COMMIT_EMAIL: "1+owner@users.noreply.github.com",
 };
 
 let files, commits, dispatches, twitchUsers, tiktokStatus, conflicts, githubStatus;
@@ -104,6 +105,8 @@ beforeEach(() => {
         return new Response("{}", { status: 409 });
       }
       assert.equal(body.sha, `sha-${files[path].length}`);
+      const identity = { name: "Lil Kifu panel", email: "1+owner@users.noreply.github.com" };
+      assert.deepEqual([body.author, body.committer], [identity, identity]); // never the owner's real email
       files[path] = Buffer.from(body.content, "base64").toString("utf8");
       commits.push(body.message);
       return Response.json({});
@@ -118,9 +121,9 @@ beforeEach(() => {
   };
 });
 
-async function signed(interaction, { tamper = false } = {}) {
+async function signed(interaction, { tamper = false, age = 0 } = {}) {
   const body = JSON.stringify(interaction);
-  const timestamp = String(Math.floor(Date.now() / 1000));
+  const timestamp = String(Math.floor(Date.now() / 1000) - age);
   const signature = await crypto.subtle.sign("Ed25519", keys.privateKey, new TextEncoder().encode(timestamp + body));
   return new Request("https://panel.example/", {
     method: "POST",
@@ -147,6 +150,17 @@ test("rejects requests that Discord didn't sign", async () => {
   assert.equal(response.status, 401);
   const unsigned = new Request("https://panel.example/", { method: "POST", body: "{}" });
   assert.equal((await worker.fetch(unsigned, ENV)).status, 401);
+});
+
+test("a correctly signed but old request is refused (no replays)", async () => {
+  const response = await worker.fetch(await signed(command("twitch", "list"), { age: 600 }), ENV);
+  assert.equal(response.status, 401);
+});
+
+test("the panel refuses to commit without a private commit email", async () => {
+  const reply = await worker.fetch(await signed(command("twitch", "add", "newone")), { ...ENV, COMMIT_EMAIL: "" });
+  assert.match((await reply.json()).data.content, /COMMIT_EMAIL isn't set/);
+  assert.deepEqual(commits, []);
 });
 
 test("answers Discord's ping", async () => {

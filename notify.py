@@ -17,6 +17,7 @@ import re
 import sys
 import time
 import tomllib
+import traceback
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -415,7 +416,8 @@ def parse_duration(text: str) -> timedelta:
 # --- What the messages look like ----------------------------------------------------------------
 
 def escape(text: str) -> str:
-    return re.sub(r"([\\*_~`|>])", r"\\\1", text)
+    """Show text as typed: no bold/italics, quotes or [masked](links) from names, titles or captions."""
+    return re.sub(r"([\\*_~`|>\[\]])", r"\\\1", text)
 
 
 def _cut(text: str, limit: int) -> str:
@@ -934,6 +936,12 @@ def main() -> int:
             changes += run()
         except ConfigError as e:
             print(f"::error::{e}")
+            exit_code = 1
+        except Exception as e:  # noqa: BLE001 - state must still be saved below
+            # Messages posted before the crash are already in state; saving it keeps the next run
+            # from posting them again (every 5 minutes, until the bug is fixed).
+            traceback.print_exc()
+            print(f"::error::Unexpected {type(e).__name__}: {e}")
             exit_code = 1
 
     if not state.get("keepalive") or now - parse_time(state["keepalive"]) >= KEEPALIVE:

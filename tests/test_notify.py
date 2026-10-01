@@ -862,6 +862,24 @@ def test_say_posts_through_the_chosen_webhook_without_pinging(repo, apis, monkey
     assert "::error::DISCORD_TIKTOK_WEBHOOK_URL is not set" in capsys.readouterr().out
 
 
+def test_markdown_links_in_captions_are_not_clickable():
+    embed = notify.tiktok_video_embed("X", {"caption": "free nitro [click](https://evil.example) *now*"})
+    assert embed["description"] == r"free nitro \[click\](https://evil.example) \*now\*"
+
+
+def test_a_crash_after_posting_still_saves_what_was_posted(repo, apis, monkeypatch, capsys):
+    def broken(*args, **kwargs):
+        raise RuntimeError("TikTok changed something")
+    monkeypatch.setattr(notify, "check_tiktok", broken)
+    assert notify.main() == 1
+    state = json.loads((repo / "state.json").read_text(encoding="utf-8"))
+    assert state["streams"]["1"]["message_id"] == "999"  # the Twitch post is remembered
+    assert (repo / "output").read_text(encoding="utf-8").startswith("changed=true")
+    assert "::error::Unexpected RuntimeError: TikTok changed something" in capsys.readouterr().out
+    assert notify.main() == 1  # still broken, but the stream isn't announced a second time
+    assert len(webhook_posts(apis, 1)) == 2  # the first post (retried once after a 429), nothing more
+
+
 def test_main_without_tiktok_webhook_still_does_twitch(repo, monkeypatch, capsys):
     monkeypatch.delenv("DISCORD_TIKTOK_WEBHOOK_URL")
     assert notify.main() == 0

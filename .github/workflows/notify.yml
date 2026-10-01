@@ -38,7 +38,8 @@ jobs:
           RUN_SOURCE: ${{ inputs.source || github.event_name }}
 
       - name: Save state
-        if: steps.notify.outputs.changed == 'true'
+        # Also after a failed check: what was already posted must be remembered, or it gets posted again.
+        if: ${{ !cancelled() && steps.notify.outputs.changed == 'true' }}
         env:
           MESSAGE: ${{ steps.notify.outputs.summary }}
         run: |
