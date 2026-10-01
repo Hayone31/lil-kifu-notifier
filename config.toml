@@ -3,6 +3,7 @@
 # Twitch usernames (or twitch.tv links) to announce.
 streamers = [
     "azimorning",
+    "ohnepixel",
 ]
 
 # Who gets pinged when someone goes live: "" for nobody, "everyone", or a role ID
