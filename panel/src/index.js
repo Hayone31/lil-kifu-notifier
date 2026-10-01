@@ -1,8 +1,10 @@
-// Lil Kifu panel: Discord slash commands that edit the Twitch and TikTok lists in config.toml.
+// Lil Kifu panel: Discord slash commands that edit the Twitch and TikTok lists in config.toml,
+// plus a 5-minute timer that starts the notification check on GitHub.
 //
 // Discord sends every command here as a signed HTTP request. The answer goes back in the HTTP
 // response, so this Worker never calls Discord itself. Changes are committed to the GitHub repo,
-// and that commit starts a notification check right away.
+// and that commit starts a notification check right away. GitHub's own scheduler is too unreliable
+// for 5-minute checks, so the timer asks GitHub to run the check instead.
 import { parseTikTokHandle, parseTwitchLogin, readList, writeList } from "./lists.js";
 
 const PING = 1, COMMAND = 2, AUTOCOMPLETE = 4;
@@ -32,7 +34,21 @@ export default {
       return json(interaction.type === AUTOCOMPLETE ? choices([]) : message(`Something went wrong: ${error.message}`));
     }
   },
+
+  async scheduled(event, env, ctx) {
+    ctx.waitUntil(startCheck(env));
+  },
 };
+
+/** Ask GitHub to run the notification workflow now. "timer" keeps the TikTok checks at their own pace. */
+export async function startCheck(env) {
+  const response = await github(env, "actions/workflows/notify.yml/dispatches", {
+    method: "POST",
+    body: JSON.stringify({ ref: "main", inputs: { source: "timer" } }),
+  });
+  if (!response.ok) console.error(`Couldn't start the check: GitHub answered ${response.status} ${await response.text()}`);
+  return response.ok;
+}
 
 export async function handle(interaction, env) {
   const isAutocomplete = interaction.type === AUTOCOMPLETE;

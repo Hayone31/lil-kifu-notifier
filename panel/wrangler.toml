@@ -6,6 +6,10 @@ workers_dev = true
 [observability]
 enabled = true
 
+# Starts the notification check on GitHub every 5 minutes (GitHub's own scheduler is unreliable).
+[triggers]
+crons = ["*/5 * * * *"]
+
 [vars]
 GITHUB_REPO = "Hayone31/lil-kifu-notifier"
 
@@ -13,6 +17,6 @@ GITHUB_REPO = "Hayone31/lil-kifu-notifier"
 # Settings > Variables and Secrets, or `npx wrangler secret put NAME`):
 #   DISCORD_PUBLIC_KEY    Discord Developer Portal > General Information > Public Key
 #   ALLOWED_GUILD_IDS     comma-separated IDs of the servers that may use the commands
-#   GITHUB_TOKEN          fine-grained token: this repository only, Contents read and write
+#   GITHUB_TOKEN          fine-grained token: this repository only, Contents and Actions read and write
 #   TWITCH_CLIENT_ID
 #   TWITCH_CLIENT_SECRET

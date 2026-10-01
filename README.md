@@ -27,9 +27,13 @@ the admin who runs a command sees the answer.
 The commands are answered by a small Cloudflare Worker in [`panel/`](panel). It commits each
 change to `config.toml`, and that commit starts a check right away. Nothing runs on anyone's PC.
 
+The same Worker also starts the notification check every 5 minutes, because GitHub's own scheduler
+often starts 5-minute workflows late or not at all. GitHub's schedule stays on as a backup, every
+30 minutes.
+
 The Worker's secrets are kept in Cloudflare, never in this repository: `DISCORD_PUBLIC_KEY`,
-`ALLOWED_GUILD_IDS`, `GITHUB_TOKEN` (a fine-grained token with *Contents: read and write* on this
-repository only), `TWITCH_CLIENT_ID` and `TWITCH_CLIENT_SECRET`.
+`ALLOWED_GUILD_IDS`, `GITHUB_TOKEN` (a fine-grained token for this repository only, with *Contents*
+and *Actions* set to read and write), `TWITCH_CLIENT_ID` and `TWITCH_CLIENT_SECRET`.
 
 Setting it up:
 1. In `panel/`, run `npx wrangler@4 deploy`.
@@ -92,8 +96,8 @@ Twitch's Watch Stream button.
 
 ## Limits
 
-- GitHub runs scheduled workflows every 5 minutes at best. When GitHub is busy, runs can start
-  10-20 minutes late.
+- Checks run every 5 minutes, so a notification can arrive up to about 5 minutes after the stream
+  starts. If the panel Worker is down, only GitHub's 30-minute backup schedule is left.
 - GitHub pauses scheduled workflows in repositories with no activity for 60 days. The workflow
   commits `state.json` at least every 25 days to prevent that. If it is ever paused, re-enable it in
   the Actions tab.

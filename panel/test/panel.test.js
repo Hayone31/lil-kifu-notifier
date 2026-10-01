@@ -1,6 +1,6 @@
 import { test, beforeEach } from "node:test";
 import assert from "node:assert/strict";
-import worker from "../src/index.js";
+import worker, { startCheck } from "../src/index.js";
 import { parseTikTokHandle, parseTwitchLogin, readList, writeList } from "../src/lists.js";
 
 const CONFIG = `# Lil Kifu & Lil Nao settings.
@@ -61,7 +61,7 @@ const ENV = {
   GITHUB_TOKEN: "gh-token", TWITCH_CLIENT_ID: "cid", TWITCH_CLIENT_SECRET: "secret",
 };
 
-let files, commits, twitchUsers, tiktokStatus, conflicts, githubStatus;
+let files, commits, dispatches, twitchUsers, tiktokStatus, conflicts, githubStatus;
 
 beforeEach(() => {
   files = {
@@ -69,6 +69,7 @@ beforeEach(() => {
     "state.json": JSON.stringify({ streams: { 9: { login: "azimorning" } }, tiktok: { "renaissance.guild": { video_count: 1 } } }),
   };
   commits = [];
+  dispatches = [];
   twitchUsers = { ohnepixel: "ohnePixel", azimorning: "AziMorning", newone: "NewOne" };
   tiktokStatus = 200;
   conflicts = 0;
@@ -79,6 +80,11 @@ beforeEach(() => {
     if (url.hostname === "api.github.com") {
       assert.equal(init.headers.Authorization, "Bearer gh-token");
       if (githubStatus !== 200) return new Response("{}", { status: githubStatus });
+      if (url.pathname === "/repos/owner/repo/actions/workflows/notify.yml/dispatches") {
+        assert.equal(method, "POST");
+        dispatches.push(JSON.parse(init.body));
+        return new Response(null, { status: 204 });
+      }
       const path = url.pathname.split("/contents/")[1];
       if (method === "GET") {
         if (!(path in files)) return new Response("{}", { status: 404 });
@@ -200,6 +206,21 @@ test("a commit by someone else in between is retried", async () => {
   assert.match(await said(command("twitch", "add", "newone")), /^Added/);
   assert.ok(files["config.toml"].includes("# someone else committed first"));
   assert.deepEqual(readList(files["config.toml"], "twitch", "streamers"), ["azimorning", "ohnepixel", "newone"]);
+});
+
+test("the 5-minute timer asks GitHub to run the check", async () => {
+  const pending = [];
+  await worker.scheduled({ cron: "*/5 * * * *" }, ENV, { waitUntil: (promise) => pending.push(promise) });
+  assert.deepEqual(await Promise.all(pending), [true]);
+  assert.deepEqual(dispatches, [{ ref: "main", inputs: { source: "timer" } }]);
+  githubStatus = 403;
+  const original = console.error;
+  console.error = () => {};
+  try {
+    assert.equal(await startCheck(ENV), false);
+  } finally {
+    console.error = original;
+  }
 });
 
 test("an expired GitHub token is explained", async () => {

@@ -508,6 +508,7 @@ def repo(tmp_path, monkeypatch, apis):
     monkeypatch.setenv("GITHUB_OUTPUT", str(tmp_path / "output"))
     monkeypatch.setenv("GITHUB_STEP_SUMMARY", str(tmp_path / "summary.md"))
     monkeypatch.delenv("GITHUB_EVENT_NAME", raising=False)
+    monkeypatch.delenv("RUN_SOURCE", raising=False)
     return tmp_path
 
 
@@ -542,6 +543,19 @@ def test_main_posts_and_saves_state(repo, apis, monkeypatch):
     assert post["allowed_mentions"] == {"parse": []} and "content" not in post
     assert (repo / "output").read_text(encoding="utf-8").endswith(
         "changed=true\nsummary=BeagleMommy uploaded a new TikTok\n")
+
+
+def test_timer_runs_keep_tiktok_at_its_own_pace(repo, apis, monkeypatch):
+    assert notify.main() == 0  # first look at the account
+    apis.tiktok.count = 105
+    monkeypatch.setenv("GITHUB_EVENT_NAME", "workflow_dispatch")
+    monkeypatch.setenv("RUN_SOURCE", "timer")
+    monkeypatch.setattr(notify, "tiktok_due", lambda now: False)  # whatever minute the test runs at
+    assert notify.main() == 0
+    assert webhook_posts(apis, 2) == []
+    monkeypatch.setenv("RUN_SOURCE", "manual")
+    assert notify.main() == 0
+    assert len(webhook_posts(apis, 2)) == 1
 
 
 def test_say_posts_through_the_chosen_webhook_without_pinging(repo, apis, monkeypatch, capsys):

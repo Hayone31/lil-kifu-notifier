@@ -2,8 +2,13 @@ name: Twitch notifications
 
 on:
   schedule:
-    - cron: "*/5 * * * *"  # every 5 minutes; GitHub may start scheduled runs a few minutes late
-  workflow_dispatch:       # "Run workflow" button for a check right now
+    - cron: "*/30 * * * *"  # backup only: the panel Worker starts a check every 5 minutes
+  workflow_dispatch:        # "Run workflow" button, and the panel Worker's 5-minute timer
+    inputs:
+      source:
+        description: Who started this check
+        required: false
+        default: manual
   push:
     branches: [main]
     paths: [config.toml]   # check right away after the settings change
@@ -30,6 +35,7 @@ jobs:
           TWITCH_CLIENT_SECRET: ${{ secrets.TWITCH_CLIENT_SECRET }}
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
           DISCORD_TIKTOK_WEBHOOK_URL: ${{ secrets.DISCORD_TIKTOK_WEBHOOK_URL }}
+          RUN_SOURCE: ${{ inputs.source || github.event_name }}
 
       - name: Save state
         if: steps.notify.outputs.changed == 'true'

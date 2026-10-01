@@ -575,6 +575,11 @@ def _raise_if_webhook_gone(error: HttpError, webhook: Webhook) -> None:
 
 # --- TikTok check -------------------------------------------------------------------------------
 
+def tiktok_due(now: datetime) -> bool:
+    """TikTok is looked at during the first five minutes of every quarter hour."""
+    return now.minute % TIKTOK_EVERY < 5
+
+
 def check_tiktok(config: TikTokConfig, state: dict, webhook: Webhook, now: datetime, *,
                  force: bool = False, fetch=tiktok_profile) -> list[str]:
     """Announce new TikTok posts. Accounts are looked at about every TIKTOK_EVERY minutes."""
@@ -583,7 +588,7 @@ def check_tiktok(config: TikTokConfig, state: dict, webhook: Webhook, now: datet
     for handle in list(entries):
         if handle not in wanted:
             del entries[handle]
-    due = force or now.minute % TIKTOK_EVERY < 5
+    due = force or tiktok_due(now)
     changes: list[str] = []
     for handle, account in wanted.items():
         if not due and handle in entries:
@@ -698,7 +703,9 @@ def main() -> int:
     state = load_state(state_path)
     exit_code = 0
     changes: list[str] = []
-    force_tiktok = os.environ.get("GITHUB_EVENT_NAME") in ("workflow_dispatch", "push")
+    # Checks started by hand or by a config change look at TikTok right away; the 5-minute timer doesn't.
+    source = os.environ.get("RUN_SOURCE") or os.environ.get("GITHUB_EVENT_NAME", "")
+    force_tiktok = source in ("manual", "push", "workflow_dispatch")
     for run in (lambda: run_twitch(config, state, now), lambda: run_tiktok(config, state, now, force_tiktok)):
         try:
             changes += run()
