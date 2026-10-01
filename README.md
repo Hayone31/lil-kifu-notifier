@@ -10,7 +10,35 @@ checking and posts through Discord webhooks:
 |---|---|---|
 | **CarolinaWWM** is live on Twitch!<br>stream title, game, profile picture, live preview, `Watch Stream` button | **CarolinaWWM** was live. The stream has ended.<br>"Stream ended" with the time it ended | **BeagleMommy uploaded a new TikTok!**<br>profile picture, `View on TikTok` button |
 
-## Add or remove accounts
+## Admin commands in Discord
+
+Server admins (members with **Manage Server**) can manage both lists without leaving Discord. Only
+the admin who runs a command sees the answer.
+
+| Command | What it does |
+|---|---|
+| `/twitch add <streamer>` | Lil Kifu announces this Twitch streamer. The name is checked on Twitch first. |
+| `/twitch remove <streamer>` | Stop announcing them. The current list is offered as suggestions. |
+| `/twitch list` | The Twitch list, showing who is live right now. |
+| `/tiktok add <account>` | Lil Nao announces this TikTok account. The name is checked on TikTok first. |
+| `/tiktok remove <account>` | Stop announcing it. |
+| `/tiktok list` | The TikTok list with each account's video count. |
+
+The commands are answered by a small Cloudflare Worker in [`panel/`](panel). It commits each
+change to `config.toml`, and that commit starts a check right away. Nothing runs on anyone's PC.
+
+The Worker's secrets are kept in Cloudflare, never in this repository: `DISCORD_PUBLIC_KEY`,
+`ALLOWED_GUILD_IDS`, `GITHUB_TOKEN` (a fine-grained token with *Contents: read and write* on this
+repository only), `TWITCH_CLIENT_ID` and `TWITCH_CLIENT_SECRET`.
+
+Setting it up:
+1. In `panel/`, run `npx wrangler@4 deploy`.
+2. Run `node --env-file=<file with DISCORD_TOKEN> register.mjs <worker URL>`. It registers the
+   commands and points Discord at the Worker.
+3. Add the server's ID to `ALLOWED_GUILD_IDS`. A server that isn't allowed yet sees its own ID when
+   someone uses a command there.
+
+## Add or remove accounts by hand
 
 Edit [`config.toml`](config.toml) on GitHub (pencil icon) and commit. A check runs right away.
 
