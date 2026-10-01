@@ -1,0 +1,31 @@
+name: Say something
+
+on:
+  workflow_dispatch:
+    inputs:
+      text:
+        description: What to post (nobody gets pinged)
+        required: true
+      as:
+        description: Who posts it
+        type: choice
+        options: ["Lil Nao (TikTok)", "Lil Kifu (Twitch)"]
+        default: "Lil Nao (TikTok)"
+
+permissions:
+  contents: read
+
+jobs:
+  say:
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Post the message
+        run: python3 notify.py
+        env:
+          SAY_TEXT: ${{ inputs.text }}
+          SAY_AS: ${{ inputs.as }}
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          DISCORD_TIKTOK_WEBHOOK_URL: ${{ secrets.DISCORD_TIKTOK_WEBHOOK_URL }}

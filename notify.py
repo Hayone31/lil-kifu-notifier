@@ -689,5 +689,34 @@ def main() -> int:
     return exit_code
 
 
+def say(text: str, voice: str) -> int:
+    """Post a plain message through one of the webhooks (the "Say something" workflow)."""
+    load_dotenv(ROOT / ".env")
+    try:
+        config = load_config()
+        if voice == "twitch":
+            secret, name, avatar = "DISCORD_WEBHOOK_URL", config.name, config.avatar_url
+        else:
+            secret, name, avatar = "DISCORD_TIKTOK_WEBHOOK_URL", config.tiktok.name, config.tiktok.avatar_url
+        webhook = Webhook(required_env(secret), secret)
+    except ConfigError as e:
+        print(f"::error::{e}")
+        return 1
+    payload = {"content": text[:2000], "allowed_mentions": {"parse": []}}  # never pings anyone
+    if name:
+        payload["username"] = name
+    if avatar:
+        payload["avatar_url"] = avatar
+    try:
+        webhook.send(payload)
+    except (HttpError, urllib.error.URLError, TimeoutError) as e:
+        print(f"::error::Discord didn't take the message: {e}")
+        return 1
+    print(f"Posted as {name or 'the webhook'}")
+    return 0
+
+
 if __name__ == "__main__":
+    if text := os.environ.get("SAY_TEXT", "").strip():
+        sys.exit(say(text, "twitch" if "twitch" in os.environ.get("SAY_AS", "").lower() else "tiktok"))
     sys.exit(main())

@@ -522,6 +522,17 @@ def test_main_posts_and_saves_state(repo, apis, monkeypatch):
         "changed=true\nsummary=BeagleMommy uploaded a new TikTok\n")
 
 
+def test_say_posts_through_the_chosen_webhook_without_pinging(repo, apis, monkeypatch, capsys):
+    assert notify.say("hi love @everyone", "tiktok") == 0
+    assert webhook_posts(apis, 2) == [
+        {"content": "hi love @everyone", "allowed_mentions": {"parse": []}, "username": "Lil Nao"}]
+    assert notify.say("hello", "twitch") == 0
+    assert webhook_posts(apis, 1)[-1]["content"] == "hello"
+    monkeypatch.delenv("DISCORD_TIKTOK_WEBHOOK_URL")
+    assert notify.say("hi", "tiktok") == 1
+    assert "::error::DISCORD_TIKTOK_WEBHOOK_URL is not set" in capsys.readouterr().out
+
+
 def test_main_without_tiktok_webhook_still_does_twitch(repo, monkeypatch, capsys):
     monkeypatch.delenv("DISCORD_TIKTOK_WEBHOOK_URL")
     assert notify.main() == 0
