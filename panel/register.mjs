@@ -26,13 +26,18 @@ const group = (name, description, item, what, addHelp, removeHelp, listHelp) => 
     { type: 1, name: "list", description: listHelp },
   ],
 });
+const tiktok = group("tiktok", "Lil Nao's TikTok upload notifications", "account", "TikTok",
+  "Announce new uploads from this TikTok account", "Stop announcing this TikTok account",
+  "Show the TikTok accounts Lil Nao announces");
+tiktok.options.push({
+  type: 1, name: "connect", description: "Get a link the account owner opens once, for captions, covers and direct links",
+  options: [nameOption("account", "TikTok username")],
+});
 const COMMANDS = [
   group("twitch", "Lil Kifu's Twitch live notifications", "streamer", "Twitch",
     "Announce when this Twitch streamer goes live", "Stop announcing this Twitch streamer",
     "Show the Twitch streamers Lil Kifu announces"),
-  group("tiktok", "Lil Nao's TikTok upload notifications", "account", "TikTok",
-    "Announce new uploads from this TikTok account", "Stop announcing this TikTok account",
-    "Show the TikTok accounts Lil Nao announces"),
+  tiktok,
 ];
 
 async function discord(method, path, body) {

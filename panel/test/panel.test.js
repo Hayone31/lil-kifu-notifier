@@ -74,6 +74,13 @@ beforeEach(() => {
   tiktokStatus = 200;
   conflicts = 0;
   githubStatus = 200;
+  const kv = new Map();
+  ENV.TIKTOK = {
+    store: kv,
+    async get(key) { return kv.get(key) ?? null; },
+    async put(key, value) { kv.set(key, value); },
+    async delete(key) { kv.delete(key); },
+  };
   globalThis.fetch = async (input, init = {}) => {
     const url = new URL(String(input));
     const method = init.method ?? "GET";
@@ -192,6 +199,18 @@ test("/twitch list and /tiktok list show live status and video counts", async ()
   assert.match(await said(command("tiktok", "list")), /\[@renaissance\.guild\]\(<https:\/\/www\.tiktok\.com\/@renaissance\.guild>\) · 1 video$/m);
   files["config.toml"] = writeList(CONFIG, "tiktok", "accounts", []);
   assert.match(await said(command("tiktok", "list")), /Lil Nao's TikTok list is empty\. Add one with `\/tiktok add`/);
+});
+
+test("/tiktok connect hands out a one-time link and /tiktok list shows connected accounts", async () => {
+  const text = await said(command("tiktok", "connect", "@Renaissance.Guild"));
+  const link = text.match(/https:\/\/panel\.example\/tiktok\/connect\?link=([0-9a-f]{32})/);
+  assert.ok(link, text);
+  assert.match(text, /^Send this link to whoever manages \*\*@Renaissance.Guild\*\*/);
+  assert.equal(ENV.TIKTOK.store.get(`link:${link[1]}`), "Renaissance.Guild");
+  assert.match(await said(command("tiktok", "connect", "no spaces allowed")), /doesn't look like a TikTok account name/);
+  assert.doesNotMatch(await said(command("tiktok", "list")), /connected to TikTok/);
+  ENV.TIKTOK.store.set("account:renaissance.guild", "{}");
+  assert.match(await said(command("tiktok", "list")), /@renaissance\.guild.*· 1 video · connected to TikTok$/m);
 });
 
 test("remove offers the current list as suggestions", async () => {

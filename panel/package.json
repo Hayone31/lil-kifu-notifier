@@ -4,7 +4,7 @@
   "type": "module",
   "description": "Discord slash commands that edit the Twitch and TikTok lists in config.toml",
   "scripts": {
-    "test": "node --test test/panel.test.js",
+    "test": "node --test test/panel.test.js test/tiktok.test.js",
     "deploy": "npx wrangler@4 deploy",
     "register": "node register.mjs"
   }

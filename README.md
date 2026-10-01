@@ -22,7 +22,8 @@ the admin who runs a command sees the answer.
 | `/twitch list` | The Twitch list, showing who is live right now. |
 | `/tiktok add <account>` | Lil Nao announces this TikTok account. The name is checked on TikTok first. |
 | `/tiktok remove <account>` | Stop announcing it. |
-| `/tiktok list` | The TikTok list with each account's video count. |
+| `/tiktok list` | The TikTok list, with each account's video count and whether it's connected to TikTok. |
+| `/tiktok connect <account>` | A one-time link for the account's owner. Opening it once gives Lil Nao the video's caption, cover and a direct link. |
 
 The commands are answered by a small Cloudflare Worker in [`panel/`](panel). It commits each
 change to `config.toml`, and that commit starts a check right away. Nothing runs on anyone's PC.
@@ -78,9 +79,20 @@ Twitch's Watch Stream button.
   - A stream counts as ended after it has been missing on two checks in a row. A crash and a quick
     reconnect keep the same message.
   - The end time shown comes from the stream's VOD when the streamer keeps VODs.
-- **TikTok:** TikTok has no free API for this, and it hides the list of videos from data-centre IPs
-  like GitHub's. A public profile still shows how many videos the account has, so Lil Nao reads that
-  number about every 15 minutes and posts when it goes up. This has three consequences:
+- **TikTok, connected accounts:** after an admin runs `/tiktok connect <account>`, the account's
+  owner opens the link once, logs in to TikTok and allows access. That uses TikTok's official API.
+  - The panel Worker keeps the tokens in Cloudflare and refreshes them. The approval lasts a year.
+  - It checks that the person logging in really is that account. Each link works once, for 24 hours.
+  - Lil Nao then posts each new video with its caption, cover and a direct link, about every 15
+    minutes.
+  - The Worker needs `TIKTOK_CLIENT_KEY` and `TIKTOK_CLIENT_SECRET` from a TikTok for Developers app.
+    The app uses Login Kit with the scopes `user.info.basic`, `user.info.profile` and `video.list`,
+    and the redirect URI `<worker>/tiktok/callback`. Its terms and privacy pages are served at
+    `<worker>/terms` and `<worker>/privacy`.
+- **TikTok, other accounts:** TikTok hides video lists from data-centre IPs like GitHub's. A public
+  profile still shows how many videos the account has, so Lil Nao reads that number about every
+  15 minutes and posts when it goes up. Connected accounts also fall back to this when the API isn't
+  answering. This has three consequences:
   - The message can't include the video's caption or cover. The button opens the profile, where the
     newest video is at the top.
   - If a video is deleted and a new one is posted between two checks, the count stays the same and

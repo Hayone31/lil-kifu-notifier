@@ -306,12 +306,12 @@ def test_config(tmp_path):
     path.write_text(
         '[twitch]\nstreamers = ["CarolinaWWM", "twitch.tv/carolinawwm", "@IIGreyl"]\nping = "<@&123>"\n'
         '[tiktok]\naccounts = ["BeagleMommy", "https://www.tiktok.com/@beaglemommy", "@some.one_2"]\n'
-        'name = "Lil Nao"\n', encoding="utf-8")
+        'name = "Lil Nao"\napi = "https://panel.example/"\n', encoding="utf-8")
     config = notify.load_config(path)
     assert config.streamers == ("carolinawwm", "iigreyl")
     assert (config.ping, config.name, config.watch_button) == ("123", "", True)
     assert config.tiktok.accounts == ("BeagleMommy", "some.one_2")
-    assert (config.tiktok.ping, config.tiktok.name) == ("", "Lil Nao")
+    assert (config.tiktok.ping, config.tiktok.name, config.tiktok.api) == ("", "Lil Nao", "https://panel.example")
     for bad in ('streamers = ["no spaces allowed"]', '[twitch]\nping = "mods"', "streamers = [",
                 '[tiktok]\naccounts = ["no spaces"]', '[tiktok]\nping = "x"'):
         path.write_text(bad, encoding="utf-8")
@@ -393,6 +393,96 @@ def test_tiktok_role_ping_and_removed_accounts():
     assert state["tiktok"] == {}
 
 
+CONNECTED = notify.TikTokConfig(accounts=("BeagleMommy",), name="Lil Nao", api="https://panel.example")
+
+
+def video(number, caption="One More Level! #fy #soulslike", created=None):
+    return {"id": f"76{number:017d}", "caption": caption, "cover": f"https://cdn/cover{number}.jpg",
+            "url": f"https://www.tiktok.com/@beaglemommy/video/76{number:017d}", "created": created or 1790000000 + number}
+
+
+class FakeVideos:
+    def __init__(self, videos=None):
+        self.videos = videos if videos is not None else [video(1)]
+        self.fail = None
+
+    def __call__(self, api, handle):
+        assert (api, handle) == ("https://panel.example", "beaglemommy")
+        if self.fail:
+            raise self.fail
+        return list(reversed(sorted(self.videos, key=lambda v: v["created"])))  # newest first, like TikTok
+
+
+def test_tiktok_official_api_posts_caption_cover_and_link():
+    state, hook, api = {"streams": {}}, FakeWebhook(), FakeVideos()
+    run = lambda: notify.check_tiktok(CONNECTED, state, hook, ON_TIME, fetch=FakeTikTok(), fetch_videos=api)
+
+    assert run() == [] and hook.sent == []  # first look only remembers what's there
+    api.videos.append(video(2, caption="Boss_fight *clip*"))
+    assert run() == ["BeagleMommy uploaded a new TikTok"]
+    assert hook.sent == [{
+        "embeds": [{"title": "BeagleMommy uploaded a new TikTok!", "color": 0xDB4263,
+                    "description": r"Boss\_fight \*clip\*", "thumbnail": {"url": "https://cdn/cover2.jpg"}}],
+        "components": [{"type": 1, "components": [{"type": 2, "style": 5, "label": "View on TikTok",
+                                                   "url": "https://www.tiktok.com/@beaglemommy/video/7600000000000000002"}]}],
+        "allowed_mentions": {"parse": []},
+        "username": "Lil Nao",
+    }]
+    api.videos = [video(2)]  # a video was deleted: nothing to announce
+    assert run() == []
+    api.videos += [video(n) for n in range(3, 9)]  # a burst after an outage: only the newest three are posted
+    assert run() == ["BeagleMommy uploaded a new TikTok"] * 3
+    assert [p["embeds"][0]["thumbnail"]["url"] for p in hook.sent[-3:]] == [f"https://cdn/cover{n}.jpg" for n in (6, 7, 8)]
+    assert run() == []
+
+
+def test_tiktok_official_api_failed_post_is_retried():
+    state, hook, api = {"streams": {}}, FakeWebhook(), FakeVideos()
+    run = lambda: notify.check_tiktok(CONNECTED, state, hook, ON_TIME, fetch=FakeTikTok(), fetch_videos=api)
+    run()
+    api.videos.append(video(2))
+    hook.fail_send = HttpError(503, "down", "x")
+    assert run() == []
+    assert run() == ["BeagleMommy uploaded a new TikTok"]
+
+
+def test_tiktok_falls_back_to_counting_when_not_connected_or_api_is_down(capsys):
+    state, hook, api, counts = {"streams": {}}, FakeWebhook(), FakeVideos(), FakeTikTok(104)
+    run = lambda: notify.check_tiktok(CONNECTED, state, hook, ON_TIME, fetch=counts, fetch_videos=api)
+    api.fail = HttpError(502, '{"error": "approval expired"}', "x")
+    assert run() == [] and state["tiktok"]["beaglemommy"] == {"video_count": 104}
+    assert "the official API isn't answering" in capsys.readouterr().out
+    counts.count = 105
+    assert run() == ["BeagleMommy uploaded a new TikTok"]
+    assert hook.sent[-1]["embeds"][0] == {"title": "BeagleMommy uploaded a new TikTok!", "color": 0xDB4263,
+                                          "thumbnail": {"url": "https://cdn/avatar.jpg"}}
+    not_connected = lambda api_url, handle: None
+    counts.count = 106
+    notify.check_tiktok(CONNECTED, state, hook, ON_TIME, fetch=counts, fetch_videos=not_connected)
+    assert hook.sent[-1]["embeds"][0]["title"] == "BeagleMommy uploaded a new TikTok!" and len(hook.sent) == 2
+
+
+def test_switching_between_api_and_counting_never_reannounces():
+    state, hook = {"streams": {}, "tiktok": {"beaglemommy": {"video_count": 104}}}, FakeWebhook()
+    api, counts = FakeVideos([video(1), video(2)]), FakeTikTok(110)
+    notify.check_tiktok(CONNECTED, state, hook, ON_TIME, fetch=counts, fetch_videos=api)
+    assert state["tiktok"]["beaglemommy"] == {"seen": ["7600000000000000002", "7600000000000000001"]}
+    api.fail = HttpError(502, "{}", "x")
+    notify.check_tiktok(CONNECTED, state, hook, ON_TIME, fetch=counts, fetch_videos=api)
+    assert state["tiktok"]["beaglemommy"] == {"video_count": 110} and hook.sent == []
+
+
+def test_tiktok_videos_asks_the_panel(monkeypatch):
+    def fake_http(method, url, **kwargs):
+        if "nobody" in url:
+            raise HttpError(404, '{"connected": false}', url)
+        assert url == "https://panel.example/tiktok/videos?account=beaglemommy"
+        return {"connected": True, "videos": [video(1)]}
+    monkeypatch.setattr(notify, "http", fake_http)
+    assert notify.tiktok_videos("https://panel.example", "beaglemommy") == [video(1)]
+    assert notify.tiktok_videos("https://panel.example", "nobody") is None
+
+
 def test_tiktok_profile_page_parsing(monkeypatch):
     data = {"__DEFAULT_SCOPE__": {"webapp.user-detail": {"statusCode": 0, "userInfo": {
         "user": {"uniqueId": "beaglemommy", "avatarLarger": "https://cdn/big.jpg"},
@@ -429,7 +519,7 @@ def test_state_is_only_written_when_it_changes(tmp_path):
 def apis():
     calls = []
     live = {"1": stream()}
-    tiktok = SimpleNamespace(count=104)
+    tiktok = SimpleNamespace(count=104, videos=None)
 
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, *args):
@@ -469,6 +559,10 @@ def apis():
 
         def do_GET(self):
             calls.append(("GET", self.path, ""))
+            if self.path.startswith("/tiktok/videos?account="):
+                if tiktok.videos is None:
+                    return self.reply(404, {"connected": False})
+                return self.reply(200, {"connected": True, "videos": tiktok.videos})
             if self.path == "/@beaglemommy":
                 assert self.headers["User-Agent"].startswith("Mozilla/5.0")
                 data = {"__DEFAULT_SCOPE__": {"webapp.user-detail": {"statusCode": 0, "userInfo": {
@@ -543,6 +637,23 @@ def test_main_posts_and_saves_state(repo, apis, monkeypatch):
     assert post["allowed_mentions"] == {"parse": []} and "content" not in post
     assert (repo / "output").read_text(encoding="utf-8").endswith(
         "changed=true\nsummary=BeagleMommy uploaded a new TikTok\n")
+
+
+def test_main_with_tiktoks_official_api(repo, apis, monkeypatch):
+    (repo / "config.toml").write_text(
+        f'[twitch]\nstreamers = []\n[tiktok]\naccounts = ["BeagleMommy"]\nname = "Lil Nao"\napi = "{apis.base}"\n',
+        encoding="utf-8")
+    monkeypatch.setenv("GITHUB_EVENT_NAME", "workflow_dispatch")
+    apis.tiktok.videos = [video(1)]
+    assert notify.main() == 0
+    assert json.loads((repo / "state.json").read_text(encoding="utf-8"))["tiktok"] == {
+        "beaglemommy": {"seen": ["7600000000000000001"]}}
+    apis.tiktok.videos = [video(2, caption="New clip"), video(1)]
+    assert notify.main() == 0
+    [post] = webhook_posts(apis, 2)
+    assert post["embeds"][0]["description"] == "New clip"
+    assert post["components"][0]["components"][0]["url"].endswith("/video/7600000000000000002")
+    assert "| TikTok @BeagleMommy | official API |" in (repo / "summary.md").read_text(encoding="utf-8")
 
 
 def test_timer_runs_keep_tiktok_at_its_own_pace(repo, apis, monkeypatch):

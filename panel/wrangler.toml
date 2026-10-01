@@ -13,6 +13,11 @@ crons = ["*/5 * * * *"]
 [vars]
 GITHUB_REPO = "Hayone31/lil-kifu-notifier"
 
+# TikTok access tokens, one-time connect links and short-lived copies of video lists.
+[[kv_namespaces]]
+binding = "TIKTOK"
+id = "7a603e79d5094c85a662117e3030bc53"
+
 # Secrets live in Cloudflare, never in this file (dashboard > Workers > lil-kifu-panel >
 # Settings > Variables and Secrets, or `npx wrangler secret put NAME`):
 #   DISCORD_PUBLIC_KEY    Discord Developer Portal > General Information > Public Key
@@ -20,3 +25,5 @@ GITHUB_REPO = "Hayone31/lil-kifu-notifier"
 #   GITHUB_TOKEN          fine-grained token: this repository only, Contents and Actions read and write
 #   TWITCH_CLIENT_ID
 #   TWITCH_CLIENT_SECRET
+#   TIKTOK_CLIENT_KEY     TikTok for Developers > the app (its sandbox) > Client key
+#   TIKTOK_CLIENT_SECRET

@@ -6,6 +6,7 @@
 // and that commit starts a notification check right away. GitHub's own scheduler is too unreliable
 // for 5-minute checks, so the timer asks GitHub to run the check instead.
 import { parseTikTokHandle, parseTwitchLogin, readList, writeList } from "./lists.js";
+import { createConnectLink, finishConnect, isConnected, latestVideos, privacyPage, startConnect, termsPage } from "./tiktok.js";
 
 const PING = 1, COMMAND = 2, AUTOCOMPLETE = 4;
 const PONG = 1, MESSAGE = 4, CHOICES = 8;
@@ -20,7 +21,11 @@ const LISTS = {
 
 export default {
   async fetch(request, env) {
-    if (request.method !== "POST") return new Response("Lil Kifu panel is running.");
+    if (request.method === "GET") {
+      const route = PAGES[new URL(request.url).pathname];
+      return route ? route(request, env) : new Response("Lil Kifu panel is running.");
+    }
+    if (request.method !== "POST") return new Response("Method not allowed", { status: 405 });
     const body = await request.text();
     const valid = await verifySignature(env.DISCORD_PUBLIC_KEY, request.headers.get("X-Signature-Ed25519"),
       request.headers.get("X-Signature-Timestamp"), body);
@@ -28,7 +33,7 @@ export default {
     const interaction = JSON.parse(body);
     if (interaction.type === PING) return json({ type: PONG });
     try {
-      return json(await handle(interaction, env));
+      return json(await handle(interaction, env, new URL(request.url).origin));
     } catch (error) {
       console.error(error);
       return json(interaction.type === AUTOCOMPLETE ? choices([]) : message(`Something went wrong: ${error.message}`));
@@ -38,6 +43,14 @@ export default {
   async scheduled(event, env, ctx) {
     ctx.waitUntil(startCheck(env));
   },
+};
+
+const PAGES = {
+  "/tiktok/connect": startConnect,
+  "/tiktok/callback": finishConnect,
+  "/tiktok/videos": latestVideos,
+  "/terms": termsPage,
+  "/privacy": privacyPage,
 };
 
 /** Ask GitHub to run the notification workflow now. "timer" keeps the TikTok checks at their own pace. */
@@ -50,7 +63,7 @@ export async function startCheck(env) {
   return response.ok;
 }
 
-export async function handle(interaction, env) {
+export async function handle(interaction, env, origin) {
   const isAutocomplete = interaction.type === AUTOCOMPLETE;
   const allowed = String(env.ALLOWED_GUILD_IDS || "").split(",").map((id) => id.trim()).filter(Boolean);
   if (!interaction.guild_id || !allowed.includes(interaction.guild_id)) {
@@ -67,7 +80,18 @@ export async function handle(interaction, env) {
   if (sub.name === "list") return showList(list, env);
   if (sub.name === "add") return add(list, input, env);
   if (sub.name === "remove") return remove(list, input, env);
+  if (sub.name === "connect" && list === LISTS.tiktok) return connect(input, env, origin);
   return message("Unknown command.");
+}
+
+async function connect(input, env, origin) {
+  const handle = parseTikTokHandle(input);
+  if (!handle) return message(`**${escape(input)}** doesn't look like a TikTok account name.`);
+  const link = await createConnectLink(env, origin, handle);
+  return message(
+    `Send this link to whoever manages **@${escape(handle)}**:\n${link}\n\n` +
+    "They log in to TikTok as that account and allow access once. After that, Lil Nao posts each upload with its caption, " +
+    `cover and a direct link. The link works once and expires in 24 hours. Add the account with \`/tiktok add\` too if it isn't on the list yet.`);
 }
 
 async function add(list, input, env) {
@@ -106,6 +130,9 @@ async function showList(list, env) {
   if (!items.length) return message(`${list.bot}'s ${list.site} list is empty. Add one with \`/${list.section} add\`.`);
   let saved = {};
   try { saved = JSON.parse(state.text || "{}"); } catch { /* an unreadable state only hides the status column */ }
+  const connected = list === LISTS.tiktok && env.TIKTOK
+    ? new Set((await Promise.all(items.map(async (item) => (await isConnected(env, item)) ? item : null))).filter(Boolean))
+    : new Set();
   const lines = items.map((item) => {
     if (list === LISTS.twitch) {
       const live = Object.values(saved.streams || {}).some((entry) => entry.login === item.toLowerCase());
@@ -113,7 +140,8 @@ async function showList(list, env) {
     }
     const count = saved.tiktok?.[item.toLowerCase()]?.video_count;
     const videos = count === undefined ? "" : ` · ${count} video${count === 1 ? "" : "s"}`;
-    return `• [@${escape(item)}](<https://www.tiktok.com/@${item.toLowerCase()}>)${videos}`;
+    const official = connected.has(item) ? " · connected to TikTok" : "";
+    return `• [@${escape(item)}](<https://www.tiktok.com/@${item.toLowerCase()}>)${videos}${official}`;
   });
   return message(`**${list.bot}'s ${list.site} list (${items.length})**\n${lines.join("\n")}`.slice(0, 2000));
 }

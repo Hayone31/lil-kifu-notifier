@@ -41,6 +41,8 @@ TIKTOK_RED = 0xDB4263                # border colour of the TikTok embed in the 
 MISSES_TO_END = 2                    # checks in a row a stream must be missing before it counts as ended
 RESTART_GAP = timedelta(minutes=10)  # a new stream this soon after the last one keeps the same message
 TIKTOK_EVERY = 15                    # minutes between TikTok checks; TikTok blocks clients that ask often
+SEEN_KEEP = 30                       # video ids remembered per TikTok account
+MAX_POSTS_PER_CHECK = 3              # never flood the channel, e.g. after a long outage
 KEEPALIVE = timedelta(days=25)       # commit at least this often; GitHub pauses idle schedules after 60 days
 UNKNOWN_WEBHOOK, UNKNOWN_MESSAGE = 10015, 10008  # Discord error codes
 
@@ -233,6 +235,7 @@ class TikTokConfig:
     ping: str = ""
     name: str = ""
     avatar_url: str = ""
+    api: str = ""  # the panel Worker, which reads TikTok's official API for connected accounts
 
 
 @dataclass(frozen=True)
@@ -307,6 +310,7 @@ def load_config(path: Path | None = None) -> Config:
             ping=_parse_ping(tiktok.get("ping"), "tiktok"),
             name=str(tiktok.get("name", "")).strip()[:80],
             avatar_url=str(tiktok.get("avatar_url", "")).strip(),
+            api=str(tiktok.get("api", "")).strip().rstrip("/"),
         ),
     )
 
@@ -432,13 +436,29 @@ def ended_message(name: str, login: str, ended_at: datetime) -> dict:
 
 
 def tiktok_message(config: TikTokConfig, account: str, avatar: str, new_posts: int) -> dict:
+    """Without TikTok's official API: only that something was uploaded, with the profile picture."""
     what = "a new TikTok" if new_posts == 1 else f"{new_posts} new TikToks"
     embed = {"title": _cut(f"{account} uploaded {what}!", 256), "color": TIKTOK_RED}
     if avatar:
         embed["thumbnail"] = {"url": avatar}
+    return _tiktok_payload(config, embed, TIKTOK_PROFILE_URL.format(account.lower()))
+
+
+def tiktok_video_message(config: TikTokConfig, account: str, video: dict) -> dict:
+    """With TikTok's official API: the video's caption, cover and a direct link."""
+    embed = {"title": _cut(f"{account} uploaded a new TikTok!", 256), "color": TIKTOK_RED}
+    caption = (video.get("caption") or "").strip()
+    if caption:
+        embed["description"] = _cut(escape(caption), 4096)
+    if video.get("cover"):
+        embed["thumbnail"] = {"url": video["cover"]}
+    return _tiktok_payload(config, embed, video.get("url") or TIKTOK_PROFILE_URL.format(account.lower()))
+
+
+def _tiktok_payload(config: TikTokConfig, embed: dict, link: str) -> dict:
     payload = {
         "embeds": [embed],
-        "components": _link_button("View on TikTok", TIKTOK_PROFILE_URL.format(account.lower())),
+        "components": _link_button("View on TikTok", link),
         "allowed_mentions": allowed_mentions(config.ping),
     }
     if config.ping:
@@ -580,9 +600,48 @@ def tiktok_due(now: datetime) -> bool:
     return now.minute % TIKTOK_EVERY < 5
 
 
+def tiktok_videos(api: str, handle: str) -> list[dict] | None:
+    """Latest videos from the panel Worker, or None when the account isn't connected to TikTok's API."""
+    try:
+        body = http("GET", f"{api}/tiktok/videos?{urllib.parse.urlencode({'account': handle})}")
+    except HttpError as e:
+        if e.status == 404:
+            return None
+        raise
+    return body.get("videos") or []
+
+
+def announce_videos(config: TikTokConfig, entry: dict, account: str, videos: list[dict], webhook: Webhook) -> list[str]:
+    """Post the videos that weren't there last time. The first look only remembers what is there."""
+    entry.pop("video_count", None)  # if the API goes away, counting starts fresh instead of re-announcing
+    ids = [video["id"] for video in videos]
+    seen = entry.get("seen")
+    if seen is None:
+        entry["seen"] = ids[:SEEN_KEEP]
+        return []
+    new = sorted((video for video in videos if video["id"] not in seen), key=lambda video: video.get("created") or 0)
+    failed: set[str] = set()
+    changes = []
+    for video in new[-MAX_POSTS_PER_CHECK:]:  # older extras count as seen without a post
+        try:
+            webhook.send(tiktok_video_message(config, account, video))
+        except HttpError as e:
+            _raise_if_webhook_gone(e, webhook)
+            warn(f"TikTok @{account}: {e} (trying again later)")
+            failed.add(video["id"])
+            continue
+        changes.append(f"{account} uploaded a new TikTok")
+    entry["seen"] = ([i for i in ids if i not in failed] + [i for i in seen if i not in ids])[:SEEN_KEEP]
+    return changes
+
+
 def check_tiktok(config: TikTokConfig, state: dict, webhook: Webhook, now: datetime, *,
-                 force: bool = False, fetch=tiktok_profile) -> list[str]:
-    """Announce new TikTok posts. Accounts are looked at about every TIKTOK_EVERY minutes."""
+                 force: bool = False, fetch=tiktok_profile, fetch_videos=tiktok_videos) -> list[str]:
+    """Announce new TikTok posts. Accounts are looked at about every TIKTOK_EVERY minutes.
+
+    Accounts connected to TikTok's official API (through the panel Worker) get the video's caption,
+    cover and link. The others are watched through the video count on their public profile page.
+    """
     entries: dict[str, dict] = state.setdefault("tiktok", {})
     wanted = {account.lower(): account for account in config.accounts}
     for handle in list(entries):
@@ -593,13 +652,22 @@ def check_tiktok(config: TikTokConfig, state: dict, webhook: Webhook, now: datet
     for handle, account in wanted.items():
         if not due and handle in entries:
             continue
+        if config.api:
+            try:
+                videos = fetch_videos(config.api, handle)
+            except (HttpError, urllib.error.URLError, TimeoutError, ValueError) as e:
+                warn(f"TikTok @{handle}: the official API isn't answering ({e}); counting videos instead")
+                videos = None
+            if videos is not None:
+                changes += announce_videos(config, entries.setdefault(handle, {}), account, videos, webhook)
+                continue
         try:
             profile = fetch(handle)
         except (HttpError, urllib.error.URLError, TimeoutError, TikTokError, ValueError, KeyError) as e:
             warn(f"TikTok @{handle}: {e} (trying again later)")
             continue
         entry = entries.get(handle)
-        if entry is None:  # first look at this account: remember where it stands, announce nothing
+        if entry is None or "video_count" not in entry:  # first look: remember where it stands, announce nothing
             entries[handle] = {"video_count": profile["video_count"]}
             continue
         new_posts = profile["video_count"] - entry["video_count"]
@@ -685,8 +753,10 @@ def report(config: Config, state: dict, changes: list[str], changed: bool) -> No
     if step_summary := os.environ.get("GITHUB_STEP_SUMMARY"):
         live = {entry["login"] for entry in state["streams"].values()}
         rows = [f"| {login} | {'🔴 live' if login in live else 'offline'} |" for login in config.streamers]
-        rows += [f"| TikTok @{account} | {state.get('tiktok', {}).get(account.lower(), {}).get('video_count', '?')} videos |"
-                 for account in config.tiktok.accounts]
+        for account in config.tiktok.accounts:
+            entry = state.get("tiktok", {}).get(account.lower(), {})
+            status = "official API" if "seen" in entry else f"{entry.get('video_count', '?')} videos"
+            rows.append(f"| TikTok @{account} | {status} |")
         with open(step_summary, "a", encoding="utf-8") as f:
             f.write("\n".join(["| Account | Status |", "|---|---|", *rows]) + "\n")
 
