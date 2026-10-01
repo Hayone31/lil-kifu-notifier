@@ -22,7 +22,7 @@ import traceback
 import urllib.error
 import urllib.parse
 import urllib.request
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -1028,7 +1028,118 @@ def say(text: str, voice: str) -> int:
     return 0
 
 
+def send_test(twitch_name: str, tiktok_name: str, wait: float = 60) -> int:
+    """The "Test notifications" workflow: real-looking posts through both webhooks, never pinging anyone.
+
+    The Twitch one uses the streamer's real profile, last title and game, and turns into "ended"
+    after `wait` seconds so nobody takes it for a stream that is on right now. The TikTok one is
+    the account's latest upload. Nothing is saved, so the real checks are not affected.
+    """
+    load_dotenv(ROOT / ".env")
+    try:
+        config = load_config()
+    except ConfigError as e:
+        print(f"::error::{e}")
+        return 1
+    exit_code = 0
+    if twitch_name.strip():
+        try:
+            exit_code |= _test_twitch(config, twitch_name, wait)
+        except (ConfigError, HttpError, urllib.error.URLError, TimeoutError) as e:
+            print(f"::error::Twitch test: {e}")
+            exit_code = 1
+    if tiktok_name.strip():
+        try:
+            exit_code |= _test_tiktok(config, tiktok_name)
+        except (ConfigError, HttpError, TikTokError, urllib.error.URLError, TimeoutError, ValueError) as e:
+            print(f"::error::TikTok test: {e}")
+            exit_code = 1
+    return exit_code
+
+
+def _test_twitch(config: Config, name: str, wait: float) -> int:
+    login = parse_login(name)
+    if not login:
+        raise ConfigError(f"{name!r} is not a Twitch username")
+    webhook = Webhook(required_env("DISCORD_WEBHOOK_URL"))
+    twitch = Twitch(required_env("TWITCH_CLIENT_ID"), required_env("TWITCH_CLIENT_SECRET"))
+    try:
+        user = twitch.users([login]).get(login)
+        if user is None:
+            print(f"::error::There's no Twitch user called {login!r}")
+            return 1
+        channel = (twitch._get("channels", [("broadcaster_id", user["id"])]) or [{}])[0]
+        videos = twitch._get("videos", [("user_id", user["id"]), ("first", "5")])
+    finally:
+        twitch.close()
+    now = datetime.now(timezone.utc)
+    stream = {"id": "test", "user_id": user["id"], "user_login": user["login"], "user_name": user["display_name"],
+              "title": channel.get("title") or "Test stream", "game_name": channel.get("game_name") or "",
+              "started_at": iso(now)}
+    payload = live_message(replace(config, ping=""), stream, user.get("profile_image_url") or "", now)
+    if frame := _broadcast_frame(videos):  # an offline channel has no live preview to show
+        payload["embeds"][0]["image"] = {"url": frame}
+    message_id = webhook.send(payload)
+    print(f"Lil Kifu: posted a sample live notification for {user['display_name']}; "
+          f"it turns into 'ended' in {wait:g}s")
+    time.sleep(wait)
+    ended = ended_message(user["display_name"], user["login"], datetime.now(timezone.utc))
+    for attempt in range(3):  # a sample "is live" post must not stay up because of a network blip
+        try:
+            webhook.edit(message_id, ended)
+            break
+        except (HttpError, urllib.error.URLError, TimeoutError):
+            if attempt == 2:
+                raise
+            time.sleep(5)
+    print("Lil Kifu: turned it into 'ended'")
+    return 0
+
+
+def _broadcast_frame(videos: list[dict]) -> str:
+    """A frame of a recent broadcast, full size if Twitch has it (its docs only promise 320x180)."""
+    for video in videos:
+        template = video.get("thumbnail_url") or ""
+        if not template or template.rsplit("/", 1)[-1].startswith("404"):  # still processing, or gone
+            continue
+        for width, height in (("1280", "720"), ("320", "180")):
+            url = template.replace("%{width}", width).replace("%{height}", height)
+            if _image_ok(url):
+                return url
+    return ""
+
+
+def _image_ok(url: str) -> bool:
+    """Whether there is an image at url (Twitch answers missing ones with an error or a 404 picture)."""
+    try:
+        request = urllib.request.Request(url, method="HEAD", headers={"User-Agent": BROWSER_UA})
+        with urllib.request.urlopen(request, timeout=10) as response:
+            return (response.headers.get_content_type().startswith("image/")
+                    and not response.geturl().rsplit("/", 1)[-1].startswith("404"))
+    except (urllib.error.URLError, TimeoutError, ValueError):
+        return False
+
+
+def _test_tiktok(config: Config, name: str) -> int:
+    handle = parse_tiktok(name)
+    if not handle:
+        raise ConfigError(f"{name!r} is not a TikTok username")
+    label = next((account for account in config.tiktok.accounts if account.lower() == handle.lower()), handle)
+    webhook = Webhook(required_env("DISCORD_TIKTOK_WEBHOOK_URL"), "DISCORD_TIKTOK_WEBHOOK_URL")
+    videos = urlebird_videos(handle.lower())
+    for video in videos[:5]:  # the newest one that really is this account's
+        details = tiktok_video_details(handle.lower(), video)
+        if details:
+            webhook.send(tiktok_video_message(replace(config.tiktok, ping=""), label, details))
+            print(f"Lil Nao: posted the latest TikTok of @{handle} as a test")
+            return 0
+    print(f"::error::Couldn't find a video of @{handle} to post")
+    return 1
+
+
 if __name__ == "__main__":
+    if os.environ.get("TEST_TWITCH", "").strip() or os.environ.get("TEST_TIKTOK", "").strip():
+        sys.exit(send_test(os.environ.get("TEST_TWITCH", ""), os.environ.get("TEST_TIKTOK", "")))
     if text := os.environ.get("SAY_TEXT", "").strip():
         sys.exit(say(text, "twitch" if "twitch" in os.environ.get("SAY_AS", "").lower() else "tiktok"))
     sys.exit(main())

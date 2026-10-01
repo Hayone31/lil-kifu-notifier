@@ -757,6 +757,7 @@ def apis():
     calls = []
     live = {"1": stream()}
     tiktok = SimpleNamespace(count=104, videos=None, urlebird=None)
+    discord = SimpleNamespace(failing_edits=0)
 
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, *args):
@@ -794,6 +795,19 @@ def apis():
                 return self.reply(429, {"message": "You are being rate limited.", "retry_after": 0.05})
             return self.reply(200, {"id": "999"})
 
+        def do_PATCH(self):
+            calls.append(("PATCH", self.path, self.body()))
+            if discord.failing_edits:
+                discord.failing_edits -= 1
+                return self.reply(502, {"message": "Bad Gateway"})
+            return self.reply(200, {"id": "999"})
+
+        def do_HEAD(self):
+            calls.append(("HEAD", self.path, ""))
+            if self.path == "/frames/v2-320x180.jpg":  # Twitch only has the small size of this frame
+                return self.reply(200, None, "image/jpeg")
+            return self.reply(404, None)
+
         def do_GET(self):
             calls.append(("GET", self.path, ""))
             if self.path == "/user/beaglemommy/":
@@ -826,11 +840,19 @@ def apis():
                 return self.reply(200, {"data": [CAROL] if "carolinawwm" in query.get("login", []) else []})
             if url.path == "/helix/streams":
                 return self.reply(200, {"data": [live[i] for i in query.get("user_id", []) if i in live]})
+            if url.path == "/helix/channels" and query["broadcaster_id"] == ["1"]:
+                return self.reply(200, {"data": [{"broadcaster_id": "1", "title": "Chill ranked", "game_name": "VALORANT"}]})
+            if url.path == "/helix/videos":
+                base = f"http://127.0.0.1:{self.server.server_address[1]}"
+                return self.reply(200, {"data": [
+                    {"thumbnail_url": "https://vod-secure.twitch.tv/_404/404_processing_%{width}x%{height}.png"},
+                    {"thumbnail_url": f"{base}/frames/v2-%{{width}}x%{{height}}.jpg"}]})
             return self.reply(404, {"message": "not found"})
 
     server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
     threading.Thread(target=server.serve_forever, daemon=True).start()
-    yield SimpleNamespace(base=f"http://127.0.0.1:{server.server_address[1]}", calls=calls, live=live, tiktok=tiktok)
+    yield SimpleNamespace(base=f"http://127.0.0.1:{server.server_address[1]}", calls=calls, live=live, tiktok=tiktok,
+                          discord=discord)
     server.shutdown()
 
 
@@ -949,6 +971,49 @@ def test_say_posts_through_the_chosen_webhook_without_pinging(repo, apis, monkey
     monkeypatch.delenv("DISCORD_TIKTOK_WEBHOOK_URL")
     assert notify.say("hi", "tiktok") == 1
     assert "::error::DISCORD_TIKTOK_WEBHOOK_URL is not set" in capsys.readouterr().out
+
+
+def test_send_test_posts_samples_without_pinging_or_saving(repo, apis):
+    (repo / "config.toml").write_text(
+        '[twitch]\nstreamers = []\nping = "everyone"\nname = "Lil Kifu"\n'
+        '[tiktok]\naccounts = ["BeagleMommy"]\nping = "everyone"\nname = "Lil Nao"\n', encoding="utf-8")
+    apis.tiktok.urlebird = ["7686796925315697952", "7690000000000000001"]
+    assert notify.send_test("CarolinaWWM", "@beaglemommy", wait=0) == 0
+
+    live = webhook_posts(apis, 1)[-1]
+    assert live["content"] == "**CarolinaWWM** is live on Twitch!" and live["allowed_mentions"] == {"parse": []}
+    embed = live["embeds"][0]
+    assert (embed["title"], embed["description"]) == ("Chill ranked", "Playing **VALORANT**")
+    # the processing placeholder is skipped, and the frame comes in the size Twitch has
+    assert embed["image"] == {"url": f"{apis.base}/frames/v2-320x180.jpg"}
+    assert [call[1] for call in apis.calls if call[0] == "HEAD"] == ["/frames/v2-1280x720.jpg", "/frames/v2-320x180.jpg"]
+    [(path, ended)] = [(call[1], json.loads(call[2])) for call in apis.calls if call[0] == "PATCH"]
+    assert path == "/api/webhooks/1/hooktoken/messages/999?with_components=true"
+    assert ended["content"] == "**CarolinaWWM** was live. The stream has ended." and ended["components"] == []
+
+    [post] = webhook_posts(apis, 2)
+    assert post["embeds"][0]["title"] == "BeagleMommy uploaded a new TikTok!"  # spelled as in config.toml
+    assert post["embeds"][0]["description"] == "caption of 7690000000000000001"  # the newest upload
+    assert post["embeds"][0]["footer"] == {"text": "❤️ 5 · 💬 2"}
+    assert "content" not in post and post["allowed_mentions"] == {"parse": []}
+    assert not (repo / "state.json").exists()  # the real checks never hear of it
+    assert ("POST", "/oauth2/revoke") in [call[:2] for call in apis.calls]
+
+
+def test_send_test_keeps_trying_to_end_the_sample(repo, apis, monkeypatch):
+    monkeypatch.setattr(notify.time, "sleep", lambda seconds: None)
+    apis.discord.failing_edits = 2
+    assert notify.send_test("carolinawwm", "", wait=60) == 0
+    assert [call[0] for call in apis.calls].count("PATCH") == 3
+    assert webhook_posts(apis, 2) == []
+
+
+def test_send_test_reports_what_it_couldnt_do(repo, apis, capsys):
+    assert notify.send_test("nobody_here", "beaglemommy", wait=0) == 1  # urlebird is down
+    out = capsys.readouterr().out
+    assert "::error::There's no Twitch user called 'nobody_here'" in out
+    assert "::error::TikTok test: HTTP 404" in out
+    assert webhook_posts(apis, 1) == [] and webhook_posts(apis, 2) == []
 
 
 def test_markdown_links_in_captions_are_not_clickable():

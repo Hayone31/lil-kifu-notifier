@@ -1,0 +1,33 @@
+name: Test notifications
+
+on:
+  workflow_dispatch:
+    inputs:
+      twitch:
+        description: "Twitch streamer for a sample live notification (turns into 'ended' after a minute). Empty = skip."
+        required: false
+        default: ""
+      tiktok:
+        description: "TikTok account whose latest upload is posted. Empty = skip."
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Post test notifications (nobody gets pinged)
+        run: python3 notify.py
+        env:
+          TEST_TWITCH: ${{ inputs.twitch }}
+          TEST_TIKTOK: ${{ inputs.tiktok }}
+          TWITCH_CLIENT_ID: ${{ secrets.TWITCH_CLIENT_ID }}
+          TWITCH_CLIENT_SECRET: ${{ secrets.TWITCH_CLIENT_SECRET }}
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          DISCORD_TIKTOK_WEBHOOK_URL: ${{ secrets.DISCORD_TIKTOK_WEBHOOK_URL }}
