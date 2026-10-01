@@ -44,6 +44,15 @@ test("rewrites one list and leaves everything else alone", () => {
   assert.deepEqual(readList(added, "tiktok", "accounts"), ["X"]);
 });
 
+test("comments and quoted brackets inside a list don't confuse the editor", () => {
+  const tricky = '[twitch]\nstreamers = [\n    "a",  # [owner] keep this one ] really\n    \'b\',\n    "c#d]",\n]\nping = ""\n';
+  assert.deepEqual(readList(tricky, "twitch", "streamers"), ["a", "b", "c#d]"]);
+  const updated = writeList(tricky, "twitch", "streamers", ["a", "b"]);
+  assert.equal(updated, '[twitch]\nstreamers = [\n    "a",\n    "b",\n]\nping = ""\n');
+  const unclosed = '[twitch]\nstreamers = [\n    "a",\n';
+  assert.throws(() => writeList(unclosed, "twitch", "streamers", ["a", "b"]), /can't edit safely/);
+});
+
 test("parses names and links", () => {
   assert.equal(parseTwitchLogin("https://www.twitch.tv/OhnePixel"), "ohnepixel");
   assert.equal(parseTwitchLogin("@AziMorning "), "azimorning");
@@ -62,7 +71,7 @@ const ENV = {
   COMMIT_EMAIL: "1+owner@users.noreply.github.com",
 };
 
-let files, commits, dispatches, twitchUsers, tiktokStatus, conflicts, githubStatus;
+let files, commits, dispatches, twitchUsers, tiktokStatus, conflicts, githubStatus, putDelay;
 
 beforeEach(() => {
   files = {
@@ -75,6 +84,7 @@ beforeEach(() => {
   tiktokStatus = 200;
   conflicts = 0;
   githubStatus = 200;
+  putDelay = 0;
   const kv = new Map();
   ENV.TIKTOK = {
     store: kv,
@@ -99,6 +109,7 @@ beforeEach(() => {
         return Response.json({ content: Buffer.from(files[path]).toString("base64"), sha: `sha-${files[path].length}` });
       }
       const body = JSON.parse(init.body);
+      if (putDelay) await new Promise((resolve) => setTimeout(resolve, putDelay));
       if (conflicts > 0) {
         conflicts--;
         files[path] += "\n# someone else committed first\n";
@@ -254,6 +265,24 @@ test("the 5-minute timer asks GitHub to run the check", async () => {
   } finally {
     console.error = original;
   }
+});
+
+test("when GitHub is slow the answer comes in time and the change still goes through", async () => {
+  putDelay = 150;
+  const pending = [];
+  const response = await worker.fetch(await signed(command("twitch", "add", "newone")),
+    { ...ENV, REPLY_DEADLINE_MS: "40" }, { waitUntil: (promise) => pending.push(promise) });
+  assert.match((await response.json()).data.content, /GitHub is slow right now, so this is still being saved/);
+  assert.deepEqual(commits, []); // not finished yet...
+  await Promise.all(pending);
+  assert.deepEqual(commits, ["Twitch: add newone (from Discord)"]); // ...but it does finish
+});
+
+test("the TikTok login pages are off until a TikTok app is set up", async () => {
+  for (const path of ["/tiktok/videos?account=renaissance.guild", "/tiktok/connect?link=x", "/tiktok/callback?state=x"]) {
+    assert.equal((await worker.fetch(new Request(`https://panel.example${path}`), ENV)).status, 404);
+  }
+  assert.equal((await worker.fetch(new Request("https://panel.example/privacy"), ENV)).status, 200);
 });
 
 test("an expired GitHub token is explained", async () => {

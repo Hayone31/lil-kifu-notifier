@@ -26,6 +26,10 @@ jobs:
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@v7
+        with:
+          # The newest state, not the commit that queued this run: a run that waited for the one
+          # before it must see what that run already posted.
+          ref: main
 
       - name: Check Twitch and TikTok, update Discord
         id: notify

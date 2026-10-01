@@ -474,7 +474,9 @@ def test_switching_between_api_and_counting_never_reannounces():
     assert state["tiktok"]["beaglemommy"] == {"seen": ["7600000000000000002", "7600000000000000001"]}
     api.fail = HttpError(502, "{}", "x")
     notify.check_tiktok(CONNECTED, state, hook, ON_TIME, list_videos=no_urlebird, fetch=counts, fetch_videos=api)
-    assert state["tiktok"]["beaglemommy"] == {"video_count": 110} and hook.sent == []
+    # the history is kept for when the list comes back; counting starts from a fresh baseline
+    assert state["tiktok"]["beaglemommy"] == {"seen": ["7600000000000000002", "7600000000000000001"],
+                                              "video_count": 110} and hook.sent == []
 
 
 def counter(kind, count):
@@ -573,6 +575,93 @@ def test_urlebird_down_falls_back_to_counting(capsys):
     assert notify.check_tiktok(TIKTOK_CONFIG, state, hook, ON_TIME, fetch=counts, list_videos=listing) == []
     assert state["tiktok"]["beaglemommy"] == {"video_count": 104}
     assert "urlebird isn't answering" in capsys.readouterr().out
+
+
+def test_a_failed_send_in_a_batch_doesnt_repeat_the_ones_already_posted():
+    state, hook = {"streams": {}, "tiktok": {"beaglemommy": {"seen": [video(1)["id"]]}}}, FakeWebhook()
+    listing = FakeListing(1, 2, 3)
+    details = lambda handle, item: {**item, "caption": "c", "url": f"https://x/{item['id']}"}
+    real_send, attempts = hook.send, []
+
+    def flaky_send(payload):
+        attempts.append(payload)
+        if len(attempts) == 2:
+            raise TimeoutError("timed out")  # the second video's post times out
+        return real_send(payload)
+    hook.send = flaky_send
+    run = lambda: notify.check_tiktok(TIKTOK_CONFIG, state, hook, ON_TIME, fetch=FakeTikTok(), list_videos=listing,
+                                      details=details)
+    assert run() == ["BeagleMommy uploaded a new TikTok"]
+    assert run() == ["BeagleMommy uploaded a new TikTok"]  # only the one that timed out
+    assert [p["components"][0]["components"][0]["url"] for p in hook.sent] == [
+        f"https://x/{video(2)['id']}", f"https://x/{video(3)['id']}"]
+
+    listing.numbers += [4, 5]  # a crash halfway through still remembers what was posted
+    hook.send = lambda payload: real_send(payload) if len(hook.sent) < 3 else (_ for _ in ()).throw(RuntimeError("boom"))
+    with pytest.raises(RuntimeError):
+        run()
+    seen = state["tiktok"]["beaglemommy"]["seen"]
+    assert video(4)["id"] in seen and video(5)["id"] not in seen
+
+
+def test_long_pages_dont_bring_old_videos_back():
+    state, hook, listing = {"streams": {}}, FakeWebhook(), FakeListing(*range(1, 32))  # 31 videos on the page
+    run = lambda: notify.check_tiktok(TIKTOK_CONFIG, state, hook, ON_TIME, fetch=FakeTikTok(), list_videos=listing,
+                                      details=lambda handle, item: {**item, "caption": "", "url": "u"})
+    for _ in range(4):
+        assert run() == []
+    assert hook.sent == []
+
+
+def test_other_accounts_videos_dont_hide_a_real_new_one():
+    state, hook = {"streams": {}, "tiktok": {"beaglemommy": {"seen": [video(1)["id"]]}}}, FakeWebhook()
+    listing = FakeListing(1, 2, 3, 4, 5)  # 2 is the account's new video; 3, 4 and 5 are someone else's, and newer
+
+    def details(handle, item):
+        return None if int(item["id"][-2:]) >= 3 else {**item, "caption": "mine", "url": "u"}
+    assert notify.check_tiktok(TIKTOK_CONFIG, state, hook, ON_TIME, fetch=FakeTikTok(), list_videos=listing,
+                               details=details) == ["BeagleMommy uploaded a new TikTok"]
+    assert hook.sent[0]["embeds"][0]["description"] == "mine"
+
+
+def test_a_video_list_outage_neither_loses_nor_repeats_announcements():
+    state, hook = {"streams": {}, "tiktok": {"beaglemommy": {"seen": [video(1)["id"]]}}}, FakeWebhook()
+    listing, counts = FakeListing(1), FakeTikTok(10)
+    details = lambda handle, item: {**item, "caption": "full post", "url": "u"}
+    run = lambda at: notify.check_tiktok(TIKTOK_CONFIG, state, hook, at, force=True, fetch=counts,
+                                         list_videos=listing, details=details)
+    at = lambda unix: datetime.fromtimestamp(unix, timezone.utc)
+    listing.fail = HttpError(503, "down", "x")
+    run(at(video(1)["created"] + 0.5))  # the list goes down: the video count takes over, history is kept
+    assert state["tiktok"]["beaglemommy"] == {"seen": [video(1)["id"]], "video_count": 10}
+    listing.numbers.append(2)
+    counts.count = 11
+    run(at(video(2)["created"]))  # an upload during the outage gets the short announcement
+    assert len(hook.sent) == 1 and "description" not in hook.sent[0]["embeds"][0]
+    listing.fail = None
+    listing.numbers.append(3)  # another upload, after that announcement
+    run(at(video(3)["created"] + 60))  # the list is back: video 2 isn't repeated, video 3 gets the full post
+    assert len(hook.sent) == 2 and hook.sent[1]["embeds"][0]["description"] == "full post"
+    assert {video(2)["id"], video(3)["id"]} <= set(state["tiktok"]["beaglemommy"]["seen"])
+    assert "video_count" not in state["tiktok"]["beaglemommy"] and "lite_announced_at" not in state["tiktok"]["beaglemommy"]
+
+
+def test_a_new_webhook_starts_clean_in_the_new_channel(monkeypatch):
+    monkeypatch.setenv("DISCORD_WEBHOOK_URL", "https://discord.com/api/webhooks/1/a")
+    monkeypatch.setenv("DISCORD_TIKTOK_WEBHOOK_URL", "https://discord.com/api/webhooks/2/b")
+    state = {"streams": {"9": {"name": "X"}}, "tiktok": {"x": {"seen": ["1"], "posted": [{"id": "1"}]}}}
+    notify.follow_webhook_changes(state)  # the first time it only notes which webhooks are in use
+    assert state["streams"] and state["tiktok"]["x"]["posted"]
+    assert all(len(value) == 12 for value in state["webhooks"].values())
+    assert {"1", "2", "a", "b"}.isdisjoint(state["webhooks"].values())  # only hashes end up in public state
+    notify.follow_webhook_changes(state)
+    assert state["streams"]
+    monkeypatch.setenv("DISCORD_WEBHOOK_URL", "https://discord.com/api/webhooks/3/c")  # Lil Kifu moved channel
+    notify.follow_webhook_changes(state)
+    assert state["streams"] == {} and state["tiktok"]["x"]["posted"]
+    monkeypatch.setenv("DISCORD_TIKTOK_WEBHOOK_URL", "https://discord.com/api/webhooks/4/d")  # so did Lil Nao
+    notify.follow_webhook_changes(state)
+    assert "posted" not in state["tiktok"]["x"] and state["tiktok"]["x"]["seen"] == ["1"]
 
 
 def test_tiktok_footer_shows_likes_and_comments():

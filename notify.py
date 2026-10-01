@@ -11,6 +11,7 @@ to this script for local test runs).
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -44,7 +45,8 @@ TIKTOK_RED = 0xDB4263                # border colour of the TikTok embed in the 
 MISSES_TO_END = 2                    # checks in a row a stream must be missing before it counts as ended
 RESTART_GAP = timedelta(minutes=10)  # a new stream this soon after the last one keeps the same message
 TIKTOK_EVERY = 15                    # minutes between TikTok checks; TikTok blocks clients that ask often
-SEEN_KEEP = 30                       # video ids remembered per TikTok account
+LIST_KEEP = 20                       # newest videos looked at per TikTok account
+SEEN_KEEP = 60                       # video ids remembered per TikTok account (must stay above LIST_KEEP)
 MAX_POSTS_PER_CHECK = 3              # never flood the channel, e.g. after a long outage
 # A new video has hardly any likes yet, so its post is updated this long after posting.
 STATS_REFRESH = (timedelta(hours=1), timedelta(hours=3), timedelta(hours=6), timedelta(hours=24))
@@ -700,42 +702,63 @@ def announce_videos(config: TikTokConfig, entry: dict, account: str, videos: lis
     are remembered (with now) so refresh_tiktok_stats can update those counts later.
     """
     entry.pop("video_count", None)  # if this source goes away, counting starts fresh instead of re-announcing
+    videos = videos[:LIST_KEEP]  # newest first; a long page would otherwise outgrow what is remembered
     ids = [video["id"] for video in videos]
     seen = entry.get("seen")
     if seen is None:
         entry["seen"] = ids[:SEEN_KEEP]
+        entry.pop("lite_announced_at", None)
         return []
     new = sorted((video for video in videos if video["id"] not in seen), key=lambda video: video.get("created") or 0)
-    failed: set[str] = set()
-    changes = []
-    for video in new[-MAX_POSTS_PER_CHECK:]:  # older extras count as seen without a post
-        if details is not None:
+    lite_announced_at = entry.pop("lite_announced_at", None)
+    if lite_announced_at:  # uploads from before then were already announced (briefly) while the list was down
+        cutoff = parse_time(lite_announced_at).timestamp()
+        new = [video for video in new if (video.get("created") or 0) > cutoff]
+    unsettled = {video["id"] for video in new}  # ids not posted yet; they stay unseen so a later check retries
+    changes: list[str] = []
+    try:
+        chosen = []
+        for video in reversed(new):  # newest first, until enough of the account's own videos are found
+            if len(chosen) == MAX_POSTS_PER_CHECK:
+                break
+            if details is None:
+                chosen.append(video)
+                continue
             try:
-                video = details(video) or {}
+                described = details(video)
             except HttpError as e:
                 if 400 <= e.status < 500 and e.status != 429:
-                    continue  # removed or private: nothing to show, so it just counts as seen
+                    unsettled.discard(video["id"])  # removed or private: nothing to show
+                    continue
                 warn(f"TikTok @{account}: {e} (trying again later)")
-                failed.add(video["id"])
                 continue
             except (urllib.error.URLError, TimeoutError, ValueError) as e:
                 warn(f"TikTok @{account}: {e} (trying again later)")
-                failed.add(video["id"])
                 continue
-            if not video:
-                continue  # someone else's video on the page
-        try:
-            message_id = webhook.send(tiktok_video_message(config, account, video))
-        except HttpError as e:
-            _raise_if_webhook_gone(e, webhook)
-            warn(f"TikTok @{account}: {e} (trying again later)")
-            failed.add(video["id"])
-            continue
-        changes.append(f"{account} uploaded a new TikTok")
-        if now is not None and video.get("stats"):
-            entry.setdefault("posted", []).append(
-                {"id": video["id"], "message_id": message_id, "posted_at": iso(now), "stats": video["stats"], "refreshes": 0})
-    entry["seen"] = ([i for i in ids if i not in failed] + [i for i in seen if i not in ids])[:SEEN_KEEP]
+            if described:
+                chosen.append(described)
+            else:
+                unsettled.discard(video["id"])  # someone else's video on the page
+        if len(chosen) == MAX_POSTS_PER_CHECK:  # older extras, never looked at, count as seen without a post
+            oldest_chosen = min(video.get("created") or 0 for video in chosen)
+            unsettled -= {video["id"] for video in new if (video.get("created") or 0) < oldest_chosen}
+        for video in reversed(chosen):  # oldest first, so the channel reads in upload order
+            try:
+                message_id = webhook.send(tiktok_video_message(config, account, video))
+            except HttpError as e:
+                _raise_if_webhook_gone(e, webhook)
+                warn(f"TikTok @{account}: {e} (trying again later)")
+                continue
+            except (urllib.error.URLError, TimeoutError) as e:
+                warn(f"TikTok @{account}: {e} (trying again later)")
+                continue
+            unsettled.discard(video["id"])  # remembered at once, even if something fails after this
+            changes.append(f"{account} uploaded a new TikTok")
+            if now is not None and video.get("stats"):
+                entry.setdefault("posted", []).append({"id": video["id"], "message_id": message_id,
+                                                       "posted_at": iso(now), "stats": video["stats"], "refreshes": 0})
+    finally:
+        entry["seen"] = ([i for i in ids if i not in unsettled] + [i for i in seen if i not in ids])[:SEEN_KEEP]
     return changes
 
 
@@ -821,19 +844,24 @@ def check_tiktok(config: TikTokConfig, state: dict, webhook: Webhook, now: datet
         except (HttpError, urllib.error.URLError, TimeoutError, TikTokError, ValueError, KeyError) as e:
             warn(f"TikTok @{handle}: {e} (trying again later)")
             continue
-        entry = entries.get(handle)
-        if entry is None or "video_count" not in entry:  # first look: remember where it stands, announce nothing
-            entries[handle] = {"video_count": profile["video_count"]}
+        entry = entries.setdefault(handle, {})  # keeps "seen" and "posted" for when the video list comes back
+        if "video_count" not in entry:  # first count: remember where it stands, announce nothing
+            entry["video_count"] = profile["video_count"]
             continue
         new_posts = profile["video_count"] - entry["video_count"]
         if new_posts > 0:
             try:
                 webhook.send(tiktok_message(config, account, profile["avatar"], new_posts))
+            except (urllib.error.URLError, TimeoutError) as e:
+                warn(f"TikTok @{handle}: {e} (trying again later)")
+                continue
             except HttpError as e:
                 _raise_if_webhook_gone(e, webhook)
                 warn(f"TikTok @{handle}: {e} (trying again later)")
                 continue  # the count stays as it was, so the next check announces it
             changes.append(f"{account} uploaded a new TikTok")
+            if "seen" in entry:  # once the video list is back, don't announce these uploads a second time
+                entry["lite_announced_at"] = iso(now)
         entry["video_count"] = profile["video_count"]  # also follows deleted videos down
     return changes
 
@@ -853,6 +881,28 @@ def load_dotenv(path: Path) -> None:
         if line and not line.startswith("#") and "=" in line:
             key, value = line.split("=", 1)
             os.environ.setdefault(key.strip(), value.strip())
+
+
+def webhook_fingerprint(secret_name: str) -> str | None:
+    """A short hash of the webhook's id: enough to notice a new webhook, useless to anyone reading state.json."""
+    match = _WEBHOOK_RE.fullmatch(_clean_webhook_url(os.environ.get(secret_name, "")))
+    return hashlib.sha256(match[1].encode()).hexdigest()[:12] if match else None
+
+
+def follow_webhook_changes(state: dict) -> None:
+    """A new webhook means a new channel, and messages in the old one can't be edited any more."""
+    known = state.setdefault("webhooks", {})
+    using = {"twitch": webhook_fingerprint("DISCORD_WEBHOOK_URL"),
+             "tiktok": webhook_fingerprint("DISCORD_TIKTOK_WEBHOOK_URL")}
+    if using["twitch"] and known.get("twitch") not in (None, using["twitch"]):
+        print("Lil Kifu's webhook changed: live messages in the old channel stay as they are, "
+              "streamers who are live right now get a new message")
+        state["streams"] = {}
+    if using["tiktok"] and known.get("tiktok") not in (None, using["tiktok"]):
+        print("Lil Nao's webhook changed: like counts of posts in the old channel are no longer updated")
+        for entry in state.get("tiktok", {}).values():
+            entry.pop("posted", None)
+    known.update({name: fingerprint for name, fingerprint in using.items() if fingerprint})
 
 
 def required_env(name: str) -> str:
@@ -926,6 +976,7 @@ def main() -> int:
         print(f"::error::{e}")
         return 1
     state = load_state(state_path)
+    follow_webhook_changes(state)
     exit_code = 0
     changes: list[str] = []
     # Checks started by hand or by a config change look at TikTok right away; the 5-minute timer doesn't.

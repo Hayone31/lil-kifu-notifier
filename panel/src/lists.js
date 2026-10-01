@@ -29,28 +29,58 @@ function sectionBounds(toml, section) {
   return [start, next ? start + next.index : toml.length];
 }
 
-function arrayPattern(key) {
-  return new RegExp(`^([ \\t]*${key}[ \\t]*=[ \\t]*)\\[([^\\]]*)\\]`, "m");
+/** Where `key = [ ... ]` sits in text. Comments and quoted strings may contain brackets, so scan them properly. */
+function findArray(text, key) {
+  const head = new RegExp(`^([ \\t]*${key}[ \\t]*=[ \\t]*)\\[`, "m").exec(text);
+  if (!head) return null;
+  const items = [];
+  for (let i = head.index + head[0].length; i < text.length; i++) {
+    const char = text[i];
+    if (char === "#") {
+      const lineEnd = text.indexOf("\n", i);
+      if (lineEnd < 0) return null;
+      i = lineEnd;
+    } else if (char === '"' || char === "'") {
+      let end = i + 1;
+      while (end < text.length && text[end] !== char && text[end] !== "\n") {
+        end += char === '"' && text[end] === "\\" ? 2 : 1;
+      }
+      if (text[end] !== char) return null;
+      items.push(text.slice(i + 1, end));
+      i = end;
+    } else if (char === "]") {
+      return { start: head.index, prefix: head[1], end: i + 1, items };
+    }
+  }
+  return null;
 }
 
 export function readList(toml, section, key) {
   const bounds = sectionBounds(toml, section);
   if (!bounds) return [];
-  const match = arrayPattern(key).exec(toml.slice(...bounds));
-  if (!match) return [];
-  const body = match[2].replace(/#[^\n]*/g, ""); // comments inside the array
-  return [...body.matchAll(/"([^"]*)"|'([^']*)'/g)].map((m) => m[1] ?? m[2]);
+  return findArray(toml.slice(...bounds), key)?.items ?? [];
 }
+
+const UNUSUAL_LAYOUT = "config.toml has a layout the panel can't edit safely. Edit it on GitHub instead";
 
 export function writeList(toml, section, key, items) {
   const array = items.length ? `[\n${items.map((item) => `    "${item}",`).join("\n")}\n]` : "[]";
   const bounds = sectionBounds(toml, section);
-  if (!bounds) return `${toml.replace(/\s*$/, "\n")}\n[${section}]\n${key} = ${array}\n`;
-  const [start, end] = bounds;
-  const text = toml.slice(start, end);
-  const match = arrayPattern(key).exec(text);
-  const updated = match
-    ? text.slice(0, match.index) + match[1] + array + text.slice(match.index + match[0].length)
-    : `\n${key} = ${array}${text}`;
-  return toml.slice(0, start) + updated + toml.slice(end);
+  let updated;
+  if (!bounds) {
+    updated = `${toml.replace(/\s*$/, "\n")}\n[${section}]\n${key} = ${array}\n`;
+  } else {
+    const [start, end] = bounds;
+    const text = toml.slice(start, end);
+    const found = findArray(text, key);
+    if (!found && new RegExp(`^[ \\t]*${key}[ \\t]*=`, "m").test(text)) throw new Error(UNUSUAL_LAYOUT);
+    const replaced = found
+      ? text.slice(0, found.start) + found.prefix + array + text.slice(found.end)
+      : `\n${key} = ${array}${text}`;
+    updated = toml.slice(0, start) + replaced + toml.slice(end);
+  }
+  // Never commit a file that doesn't read back exactly as intended: a broken config.toml stops every notification.
+  const check = readList(updated, section, key);
+  if (check.length !== items.length || check.some((item, index) => item !== items[index])) throw new Error(UNUSUAL_LAYOUT);
+  return updated;
 }

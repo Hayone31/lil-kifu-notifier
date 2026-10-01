@@ -20,9 +20,12 @@ const LISTS = {
 };
 
 export default {
-  async fetch(request, env) {
+  async fetch(request, env, ctx) {
     if (request.method === "GET") {
-      const route = PAGES[new URL(request.url).pathname];
+      const path = new URL(request.url).pathname;
+      const route = PAGES[path];
+      // The TikTok login pages only exist once a TikTok app is set up (see README).
+      if (route && path.startsWith("/tiktok/") && !env.TIKTOK_CLIENT_KEY) return new Response("Not found", { status: 404 });
       return route ? route(request, env) : new Response("Lil Kifu panel is running.");
     }
     if (request.method !== "POST") return new Response("Method not allowed", { status: 405 });
@@ -33,7 +36,18 @@ export default {
     const interaction = JSON.parse(body);
     if (interaction.type === PING) return json({ type: PONG });
     try {
-      return json(await handle(interaction, env, new URL(request.url).origin));
+      const work = handle(interaction, env, new URL(request.url).origin);
+      const finished = work.catch((error) => console.error(error));
+      let timer;
+      const late = new Promise((resolve) => { timer = setTimeout(() => resolve(null), Number(env.REPLY_DEADLINE_MS) || 2500); });
+      const reply = await Promise.race([work, late]);
+      clearTimeout(timer);
+      if (reply) return json(reply);
+      // Discord stops waiting after 3 seconds. Let the change finish in the background and say so,
+      // instead of Discord showing "interaction failed" for a change that still goes through.
+      ctx?.waitUntil?.(finished);
+      return json(interaction.type === AUTOCOMPLETE ? choices([]) : message(
+        `GitHub is slow right now, so this is still being saved. Check in a moment with \`/${interaction.data?.name ?? "twitch"} list\`.`));
     } catch (error) {
       console.error(error);
       return json(interaction.type === AUTOCOMPLETE ? choices([]) : message(`Something went wrong: ${error.message}`));
