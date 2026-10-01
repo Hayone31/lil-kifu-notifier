@@ -1,0 +1,43 @@
+name: Twitch notifications
+
+on:
+  schedule:
+    - cron: "*/5 * * * *"  # every 5 minutes; GitHub may start scheduled runs a few minutes late
+  workflow_dispatch:       # "Run workflow" button for a check right now
+
+permissions:
+  contents: write          # commit state.json
+
+concurrency:
+  group: twitch-notifications
+  cancel-in-progress: false
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Check Twitch and update Discord
+        id: notify
+        run: python3 notify.py
+        env:
+          TWITCH_CLIENT_ID: ${{ secrets.TWITCH_CLIENT_ID }}
+          TWITCH_CLIENT_SECRET: ${{ secrets.TWITCH_CLIENT_SECRET }}
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+
+      - name: Save state
+        if: steps.notify.outputs.changed == 'true'
+        env:
+          MESSAGE: ${{ steps.notify.outputs.summary }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add state.json
+          git commit --quiet -m "$MESSAGE"
+          for attempt in 1 2 3; do
+            git pull --rebase --quiet && git push --quiet && exit 0
+            sleep 5
+          done
+          exit 1

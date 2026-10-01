@@ -1,0 +1,17 @@
+# Lil Kifu settings. Edit this file on GitHub (pencil icon) and commit; the next check uses it.
+
+# Twitch usernames (or twitch.tv links) to announce.
+streamers = [
+    "azimorning",
+]
+
+# Who gets pinged when someone goes live: "" for nobody, "everyone", or a role ID
+# (Discord: turn on Developer Mode, then Server Settings > Roles > right-click a role > Copy Role ID).
+ping = ""
+
+# Name and picture of the notifications. Leave empty to use the webhook's own name and avatar.
+name = "Lil Kifu"
+avatar_url = ""
+
+# Show a "Watch Stream" button under live notifications.
+watch_button = true
