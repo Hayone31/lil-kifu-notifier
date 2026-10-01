@@ -8,7 +8,7 @@ checking and posts through Discord webhooks:
 
 | Lil Kifu, while live | Lil Kifu, after the stream | Lil Nao |
 |---|---|---|
-| **CarolinaWWM** is live on Twitch!<br>stream title, game, profile picture, live preview, `Watch Stream` button | **CarolinaWWM** was live. The stream has ended.<br>"Stream ended" with the time it ended | **BeagleMommy uploaded a new TikTok!**<br>profile picture, `View on TikTok` button |
+| **CarolinaWWM** is live on Twitch!<br>stream title, game, profile picture, live preview, `Watch Stream` button | **CarolinaWWM** was live. The stream has ended.<br>"Stream ended" with the time it ended | **BeagleMommy uploaded a new TikTok!**<br>the video's caption and cover, `View on TikTok` button linking to the video |
 
 ## Admin commands in Discord
 
@@ -78,6 +78,16 @@ Twitch's Watch Stream button.
   - A stream counts as ended after it has been missing on two checks in a row. A crash and a quick
     reconnect keep the same message.
   - The end time shown comes from the stream's VOD when the streamer keeps VODs.
+- **TikTok:** TikTok hides its video lists from data-centre IPs like GitHub's. Lil Nao therefore reads
+  each account's recent videos from [urlebird.com](https://urlebird.com), a public TikTok viewer,
+  about every 15 minutes.
+  - For each new video it asks TikTok's official oEmbed endpoint for the caption and cover. oEmbed
+    also confirms that the video belongs to the right account, so videos of other accounts that
+    show up on the page are never announced.
+  - It posts at most 3 videos per check.
+  - urlebird is an unofficial site. If it stops answering, Lil Nao falls back to the video count on
+    the account's public TikTok profile and posts "uploaded a new TikTok" with the profile picture
+    and a profile link.
 - **TikTok, connected accounts (optional, not set up):** this needs a TikTok for Developers app,
   `WITH_TIKTOK_CONNECT=1` when running `register.mjs`, and `api = "<worker URL>"` under `[tiktok]`.
   After an admin runs `/tiktok connect <account>`, the account's owner opens the link once, logs in

@@ -329,6 +329,11 @@ def test_config_without_sections_still_works(tmp_path):
 # --- TikTok -------------------------------------------------------------------------------------
 
 TIKTOK_CONFIG = notify.TikTokConfig(accounts=("BeagleMommy",), name="Lil Nao")
+
+
+def no_urlebird(handle):
+    raise notify.TikTokError("urlebird is off in this test")
+
 ON_TIME = datetime(2026, 10, 1, 12, 2, tzinfo=timezone.utc)     # minute 2: a TikTok check is due
 OFF_TIME = datetime(2026, 10, 1, 12, 7, tzinfo=timezone.utc)    # minute 7: not due
 
@@ -349,7 +354,7 @@ class FakeTikTok:
 
 def test_tiktok_lifecycle():
     state, hook, tiktok = {"streams": {}}, FakeWebhook(), FakeTikTok()
-    run = lambda at, **kw: notify.check_tiktok(TIKTOK_CONFIG, state, hook, at, fetch=tiktok, **kw)
+    run = lambda at, **kw: notify.check_tiktok(TIKTOK_CONFIG, state, hook, at, list_videos=no_urlebird, fetch=tiktok, **kw)
 
     assert run(OFF_TIME) == []  # a new account is looked at right away, but only remembered
     assert state["tiktok"] == {"beaglemommy": {"video_count": 104}} and hook.sent == []
@@ -376,12 +381,12 @@ def test_tiktok_lifecycle():
 def test_tiktok_failures_are_retried():
     state, hook, tiktok = {"streams": {}, "tiktok": {"beaglemommy": {"video_count": 104}}}, FakeWebhook(), FakeTikTok(105)
     tiktok.fail = notify.TikTokError("blocked")
-    assert notify.check_tiktok(TIKTOK_CONFIG, state, hook, ON_TIME, fetch=tiktok) == []
+    assert notify.check_tiktok(TIKTOK_CONFIG, state, hook, ON_TIME, list_videos=no_urlebird, fetch=tiktok) == []
     hook.fail_send = HttpError(503, "down", "x")
     tiktok.fail = None
-    assert notify.check_tiktok(TIKTOK_CONFIG, state, hook, ON_TIME, fetch=tiktok) == []
+    assert notify.check_tiktok(TIKTOK_CONFIG, state, hook, ON_TIME, list_videos=no_urlebird, fetch=tiktok) == []
     assert state["tiktok"]["beaglemommy"]["video_count"] == 104  # not counted as announced
-    assert notify.check_tiktok(TIKTOK_CONFIG, state, hook, ON_TIME, fetch=tiktok) == ["BeagleMommy uploaded a new TikTok"]
+    assert notify.check_tiktok(TIKTOK_CONFIG, state, hook, ON_TIME, list_videos=no_urlebird, fetch=tiktok) == ["BeagleMommy uploaded a new TikTok"]
 
 
 def test_tiktok_role_ping_and_removed_accounts():
@@ -389,7 +394,7 @@ def test_tiktok_role_ping_and_removed_accounts():
     assert payload["content"] == "<@&555>" and payload["allowed_mentions"] == {"parse": [], "roles": ["555"]}
     assert "thumbnail" not in payload["embeds"][0] and "username" not in payload
     state = {"streams": {}, "tiktok": {"gone": {"video_count": 1}}}
-    notify.check_tiktok(notify.TikTokConfig(), state, FakeWebhook(), ON_TIME, fetch=FakeTikTok())
+    notify.check_tiktok(notify.TikTokConfig(), state, FakeWebhook(), ON_TIME, list_videos=no_urlebird, fetch=FakeTikTok())
     assert state["tiktok"] == {}
 
 
@@ -415,7 +420,7 @@ class FakeVideos:
 
 def test_tiktok_official_api_posts_caption_cover_and_link():
     state, hook, api = {"streams": {}}, FakeWebhook(), FakeVideos()
-    run = lambda: notify.check_tiktok(CONNECTED, state, hook, ON_TIME, fetch=FakeTikTok(), fetch_videos=api)
+    run = lambda: notify.check_tiktok(CONNECTED, state, hook, ON_TIME, list_videos=no_urlebird, fetch=FakeTikTok(), fetch_videos=api)
 
     assert run() == [] and hook.sent == []  # first look only remembers what's there
     api.videos.append(video(2, caption="Boss_fight *clip*"))
@@ -438,7 +443,7 @@ def test_tiktok_official_api_posts_caption_cover_and_link():
 
 def test_tiktok_official_api_failed_post_is_retried():
     state, hook, api = {"streams": {}}, FakeWebhook(), FakeVideos()
-    run = lambda: notify.check_tiktok(CONNECTED, state, hook, ON_TIME, fetch=FakeTikTok(), fetch_videos=api)
+    run = lambda: notify.check_tiktok(CONNECTED, state, hook, ON_TIME, list_videos=no_urlebird, fetch=FakeTikTok(), fetch_videos=api)
     run()
     api.videos.append(video(2))
     hook.fail_send = HttpError(503, "down", "x")
@@ -448,7 +453,7 @@ def test_tiktok_official_api_failed_post_is_retried():
 
 def test_tiktok_falls_back_to_counting_when_not_connected_or_api_is_down(capsys):
     state, hook, api, counts = {"streams": {}}, FakeWebhook(), FakeVideos(), FakeTikTok(104)
-    run = lambda: notify.check_tiktok(CONNECTED, state, hook, ON_TIME, fetch=counts, fetch_videos=api)
+    run = lambda: notify.check_tiktok(CONNECTED, state, hook, ON_TIME, list_videos=no_urlebird, fetch=counts, fetch_videos=api)
     api.fail = HttpError(502, '{"error": "approval expired"}', "x")
     assert run() == [] and state["tiktok"]["beaglemommy"] == {"video_count": 104}
     assert "the official API isn't answering" in capsys.readouterr().out
@@ -458,18 +463,104 @@ def test_tiktok_falls_back_to_counting_when_not_connected_or_api_is_down(capsys)
                                           "thumbnail": {"url": "https://cdn/avatar.jpg"}}
     not_connected = lambda api_url, handle: None
     counts.count = 106
-    notify.check_tiktok(CONNECTED, state, hook, ON_TIME, fetch=counts, fetch_videos=not_connected)
+    notify.check_tiktok(CONNECTED, state, hook, ON_TIME, list_videos=no_urlebird, fetch=counts, fetch_videos=not_connected)
     assert hook.sent[-1]["embeds"][0]["title"] == "BeagleMommy uploaded a new TikTok!" and len(hook.sent) == 2
 
 
 def test_switching_between_api_and_counting_never_reannounces():
     state, hook = {"streams": {}, "tiktok": {"beaglemommy": {"video_count": 104}}}, FakeWebhook()
     api, counts = FakeVideos([video(1), video(2)]), FakeTikTok(110)
-    notify.check_tiktok(CONNECTED, state, hook, ON_TIME, fetch=counts, fetch_videos=api)
+    notify.check_tiktok(CONNECTED, state, hook, ON_TIME, list_videos=no_urlebird, fetch=counts, fetch_videos=api)
     assert state["tiktok"]["beaglemommy"] == {"seen": ["7600000000000000002", "7600000000000000001"]}
     api.fail = HttpError(502, "{}", "x")
-    notify.check_tiktok(CONNECTED, state, hook, ON_TIME, fetch=counts, fetch_videos=api)
+    notify.check_tiktok(CONNECTED, state, hook, ON_TIME, list_videos=no_urlebird, fetch=counts, fetch_videos=api)
     assert state["tiktok"]["beaglemommy"] == {"video_count": 110} and hook.sent == []
+
+
+URLEBIRD_PAGE = """<html><head><title>Renaissance Guild WWM (@renaissance.guild) - Urlebird</title></head><body>
+<a href="https://urlebird.com/video/more-than-a-guild-7686796925315697952/">More than a guild</a>
+<a href='https://urlebird.com/video/first-post-7600000000000000001/'><img></a>
+<a href="https://urlebird.com/user/renaissance.guild/">profile</a></body></html>"""
+
+
+def test_urlebird_page_parsing(monkeypatch):
+    page = URLEBIRD_PAGE
+    monkeypatch.setattr(notify, "http", lambda *args, **kwargs: page)
+    videos = notify.urlebird_videos("renaissance.guild")
+    assert [v["id"] for v in videos] == ["7686796925315697952", "7600000000000000001"]  # newest first
+    assert datetime.fromtimestamp(videos[0]["created"], timezone.utc).date().isoformat() == "2026-09-18"
+    page = "<html><title>Just a moment...</title></html>"  # e.g. a bot check instead of the profile
+    with pytest.raises(notify.TikTokError, match="unexpected page"):
+        notify.urlebird_videos("renaissance.guild")
+
+
+def test_tiktok_video_details_checks_the_author(monkeypatch):
+    seen_urls = []
+
+    def fake_http(method, url, **kwargs):
+        seen_urls.append(url)
+        return {"author_unique_id": author, "title": "More than a guild #wwm", "thumbnail_url": "https://cdn/c.jpg"}
+    monkeypatch.setattr(notify, "http", fake_http)
+    author = "renaissance.guild"
+    details = notify.tiktok_video_details("renaissance.guild", {"id": "7686796925315697952", "created": 1})
+    assert details == {"id": "7686796925315697952", "created": 1, "caption": "More than a guild #wwm",
+                       "cover": "https://cdn/c.jpg", "url": "https://www.tiktok.com/@renaissance.guild/video/7686796925315697952"}
+    assert seen_urls[0] == ("https://www.tiktok.com/oembed?url=https%3A%2F%2Fwww.tiktok.com%2F%40renaissance.guild"
+                            "%2Fvideo%2F7686796925315697952")
+    author = "someone.else"
+    assert notify.tiktok_video_details("renaissance.guild", {"id": "1", "created": 1}) is None
+
+
+class FakeListing:
+    def __init__(self, *numbers):
+        self.numbers = list(numbers)
+        self.fail = None
+
+    def __call__(self, handle):
+        if self.fail:
+            raise self.fail
+        return [{"id": video(n)["id"], "created": video(n)["created"]} for n in sorted(self.numbers, reverse=True)]
+
+
+def test_urlebird_and_oembed_post_caption_cover_and_link():
+    state, hook, listing = {"streams": {}, "tiktok": {"beaglemommy": {"video_count": 104}}}, FakeWebhook(), FakeListing(1)
+    failures = {}
+
+    def details(handle, item):
+        if item["id"] in failures:
+            raise failures[item["id"]]
+        if item["id"].endswith("3"):
+            return None  # another account's video showed up on the page
+        number = int(item["id"][-2:])
+        return {**item, "caption": f"clip {number}", "cover": f"https://cdn/cover{number}.jpg",
+                "url": f"https://www.tiktok.com/@beaglemommy/video/{item['id']}"}
+
+    run = lambda: notify.check_tiktok(TIKTOK_CONFIG, state, hook, ON_TIME, fetch=FakeTikTok(), list_videos=listing,
+                                      details=details)
+    assert run() == [] and state["tiktok"]["beaglemommy"] == {"seen": [video(1)["id"]]}  # switch from counting: no repeat
+    listing.numbers = [1, 2, 3]
+    assert run() == ["BeagleMommy uploaded a new TikTok"]
+    [post] = hook.sent
+    assert post["embeds"][0] == {"title": "BeagleMommy uploaded a new TikTok!", "color": 0xDB4263,
+                                 "description": "clip 2", "thumbnail": {"url": "https://cdn/cover2.jpg"}}
+    assert post["components"][0]["components"][0]["url"] == f"https://www.tiktok.com/@beaglemommy/video/{video(2)['id']}"
+    assert video(3)["id"] in state["tiktok"]["beaglemommy"]["seen"]  # skipped, not retried
+
+    listing.numbers = [1, 2, 3, 4, 5]
+    failures[video(4)["id"]] = HttpError(404, "{}", "x")  # gone again: just counts as seen
+    failures[video(5)["id"]] = HttpError(503, "{}", "x")  # TikTok hiccup: tried again next time
+    assert run() == []
+    del failures[video(5)["id"]]
+    assert run() == ["BeagleMommy uploaded a new TikTok"] and hook.sent[-1]["embeds"][0]["description"] == "clip 5"
+    assert run() == []
+
+
+def test_urlebird_down_falls_back_to_counting(capsys):
+    state, hook, listing, counts = {"streams": {}}, FakeWebhook(), FakeListing(1), FakeTikTok(104)
+    listing.fail = HttpError(403, "Just a moment...", "x")
+    assert notify.check_tiktok(TIKTOK_CONFIG, state, hook, ON_TIME, fetch=counts, list_videos=listing) == []
+    assert state["tiktok"]["beaglemommy"] == {"video_count": 104}
+    assert "urlebird isn't answering" in capsys.readouterr().out
 
 
 def test_tiktok_videos_asks_the_panel(monkeypatch):
@@ -519,7 +610,7 @@ def test_state_is_only_written_when_it_changes(tmp_path):
 def apis():
     calls = []
     live = {"1": stream()}
-    tiktok = SimpleNamespace(count=104, videos=None)
+    tiktok = SimpleNamespace(count=104, videos=None, urlebird=None)
 
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, *args):
@@ -559,6 +650,15 @@ def apis():
 
         def do_GET(self):
             calls.append(("GET", self.path, ""))
+            if self.path == "/user/beaglemommy/":
+                if tiktok.urlebird is None:
+                    return self.reply(404, None)
+                links = "".join(f'<a href="https://urlebird.com/video/clip-{i}/">x</a>' for i in tiktok.urlebird)
+                return self.reply(200, f"<title>Brandy (@beaglemommy) - Urlebird</title>{links}", "text/html")
+            if self.path.startswith("/oembed?url="):
+                video_id = parse_qs(urlparse(self.path).query)["url"][0].rsplit("/", 1)[1]
+                return self.reply(200, {"author_unique_id": "beaglemommy", "title": f"caption of {video_id}",
+                                        "thumbnail_url": f"https://cdn/{video_id}.jpg"})
             if self.path.startswith("/tiktok/videos?account="):
                 if tiktok.videos is None:
                     return self.reply(404, {"connected": False})
@@ -594,6 +694,8 @@ def repo(tmp_path, monkeypatch, apis):
     monkeypatch.setattr(notify, "TWITCH_REVOKE_URL", f"{apis.base}/oauth2/revoke")
     monkeypatch.setattr(notify, "TWITCH_API", f"{apis.base}/helix")
     monkeypatch.setattr(notify, "TIKTOK_PROFILE_URL", f"{apis.base}/@{{}}")
+    monkeypatch.setattr(notify, "URLEBIRD_URL", f"{apis.base}/user/{{}}/")
+    monkeypatch.setattr(notify, "TIKTOK_OEMBED_URL", f"{apis.base}/oembed?url={{}}")
     monkeypatch.setattr(notify, "DISCORD_API", f"{apis.base}/api")
     monkeypatch.setenv("TWITCH_CLIENT_ID", "cid")
     monkeypatch.setenv("TWITCH_CLIENT_SECRET", "secret")
@@ -639,6 +741,22 @@ def test_main_posts_and_saves_state(repo, apis, monkeypatch):
         "changed=true\nsummary=BeagleMommy uploaded a new TikTok\n")
 
 
+def test_main_finds_new_tiktoks_through_urlebird(repo, apis, monkeypatch):
+    monkeypatch.setenv("GITHUB_EVENT_NAME", "workflow_dispatch")
+    apis.tiktok.urlebird = ["7686796925315697952"]
+    assert notify.main() == 0
+    assert json.loads((repo / "state.json").read_text(encoding="utf-8"))["tiktok"] == {
+        "beaglemommy": {"seen": ["7686796925315697952"]}}
+    apis.tiktok.urlebird = ["7686796925315697952", "7690000000000000001"]
+    assert notify.main() == 0
+    [post] = webhook_posts(apis, 2)
+    assert post["embeds"][0] == {"title": "BeagleMommy uploaded a new TikTok!", "color": 0xDB4263,
+                                 "description": "caption of 7690000000000000001",
+                                 "thumbnail": {"url": "https://cdn/7690000000000000001.jpg"}}
+    assert post["components"][0]["components"][0]["url"] == "https://www.tiktok.com/@beaglemommy/video/7690000000000000001"
+    assert post["username"] == "Lil Nao" and post["allowed_mentions"] == {"parse": []}
+
+
 def test_main_with_tiktoks_official_api(repo, apis, monkeypatch):
     (repo / "config.toml").write_text(
         f'[twitch]\nstreamers = []\n[tiktok]\naccounts = ["BeagleMommy"]\nname = "Lil Nao"\napi = "{apis.base}"\n',
@@ -653,7 +771,7 @@ def test_main_with_tiktoks_official_api(repo, apis, monkeypatch):
     [post] = webhook_posts(apis, 2)
     assert post["embeds"][0]["description"] == "New clip"
     assert post["components"][0]["components"][0]["url"].endswith("/video/7600000000000000002")
-    assert "| TikTok @BeagleMommy | official API |" in (repo / "summary.md").read_text(encoding="utf-8")
+    assert "| TikTok @BeagleMommy | watching new videos |" in (repo / "summary.md").read_text(encoding="utf-8")
 
 
 def test_timer_runs_keep_tiktok_at_its_own_pace(repo, apis, monkeypatch):

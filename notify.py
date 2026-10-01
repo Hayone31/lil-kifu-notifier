@@ -30,6 +30,8 @@ TWITCH_TOKEN_URL = "https://id.twitch.tv/oauth2/token"
 TWITCH_REVOKE_URL = "https://id.twitch.tv/oauth2/revoke"
 TWITCH_API = "https://api.twitch.tv/helix"
 TIKTOK_PROFILE_URL = "https://www.tiktok.com/@{}"
+TIKTOK_OEMBED_URL = "https://www.tiktok.com/oembed?url={}"
+URLEBIRD_URL = "https://urlebird.com/user/{}/"
 DISCORD_API = "https://discord.com/api/v10"
 USER_AGENT = "DiscordBot (https://github.com, 1.0) LilKifu"
 BROWSER_UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) "
@@ -166,6 +168,29 @@ class Twitch:
             http("POST", TWITCH_REVOKE_URL, form={"client_id": self.client_id, "token": self.token})
         except (HttpError, urllib.error.URLError, TimeoutError):
             pass
+
+
+def urlebird_videos(handle: str) -> list[dict]:
+    """Recent videos of a TikTok account, newest first, read from urlebird.com.
+
+    TikTok hides its video lists from data-centre IPs such as GitHub's; urlebird, a public TikTok
+    viewer, still shows them. A TikTok video id carries its upload time in the upper 32 bits.
+    """
+    html = http("GET", URLEBIRD_URL.format(handle), text=True,
+                headers={"User-Agent": BROWSER_UA, "Accept-Language": "en-US,en;q=0.9"})
+    if f"@{handle.lower()}" not in html.lower():
+        raise TikTokError("urlebird answered with an unexpected page (blocked or changed?)")
+    ids = sorted({int(found) for found in re.findall(r'/video/[^"\'\s>]*?(\d{18,20})', html)}, reverse=True)
+    return [{"id": str(video_id), "created": video_id >> 32} for video_id in ids]
+
+
+def tiktok_video_details(handle: str, video: dict) -> dict | None:
+    """Caption and cover from TikTok's official oEmbed. None if the video belongs to someone else."""
+    link = f"https://www.tiktok.com/@{handle}/video/{video['id']}"
+    data = http("GET", TIKTOK_OEMBED_URL.format(urllib.parse.quote(link, safe="")), headers={"User-Agent": BROWSER_UA})
+    if str(data.get("author_unique_id", "")).lower() != handle.lower():
+        return None
+    return {**video, "caption": data.get("title") or "", "cover": data.get("thumbnail_url") or "", "url": link}
 
 
 def tiktok_profile(handle: str) -> dict:
@@ -611,9 +636,14 @@ def tiktok_videos(api: str, handle: str) -> list[dict] | None:
     return body.get("videos") or []
 
 
-def announce_videos(config: TikTokConfig, entry: dict, account: str, videos: list[dict], webhook: Webhook) -> list[str]:
-    """Post the videos that weren't there last time. The first look only remembers what is there."""
-    entry.pop("video_count", None)  # if the API goes away, counting starts fresh instead of re-announcing
+def announce_videos(config: TikTokConfig, entry: dict, account: str, videos: list[dict], webhook: Webhook,
+                    details=None) -> list[str]:
+    """Post the videos that weren't there last time. The first look only remembers what is there.
+
+    details(video) fills in caption, cover and link when the list only has ids; it returns None for
+    a video that turns out to belong to another account.
+    """
+    entry.pop("video_count", None)  # if this source goes away, counting starts fresh instead of re-announcing
     ids = [video["id"] for video in videos]
     seen = entry.get("seen")
     if seen is None:
@@ -623,6 +653,21 @@ def announce_videos(config: TikTokConfig, entry: dict, account: str, videos: lis
     failed: set[str] = set()
     changes = []
     for video in new[-MAX_POSTS_PER_CHECK:]:  # older extras count as seen without a post
+        if details is not None:
+            try:
+                video = details(video) or {}
+            except HttpError as e:
+                if 400 <= e.status < 500 and e.status != 429:
+                    continue  # removed or private: nothing to show, so it just counts as seen
+                warn(f"TikTok @{account}: {e} (trying again later)")
+                failed.add(video["id"])
+                continue
+            except (urllib.error.URLError, TimeoutError, ValueError) as e:
+                warn(f"TikTok @{account}: {e} (trying again later)")
+                failed.add(video["id"])
+                continue
+            if not video:
+                continue  # someone else's video on the page
         try:
             webhook.send(tiktok_video_message(config, account, video))
         except HttpError as e:
@@ -636,11 +681,14 @@ def announce_videos(config: TikTokConfig, entry: dict, account: str, videos: lis
 
 
 def check_tiktok(config: TikTokConfig, state: dict, webhook: Webhook, now: datetime, *,
-                 force: bool = False, fetch=tiktok_profile, fetch_videos=tiktok_videos) -> list[str]:
+                 force: bool = False, fetch=tiktok_profile, fetch_videos=tiktok_videos,
+                 list_videos=urlebird_videos, details=tiktok_video_details) -> list[str]:
     """Announce new TikTok posts. Accounts are looked at about every TIKTOK_EVERY minutes.
 
-    Accounts connected to TikTok's official API (through the panel Worker) get the video's caption,
-    cover and link. The others are watched through the video count on their public profile page.
+    New videos are found through urlebird and described through TikTok's oEmbed, so each post shows
+    the caption, cover and a direct link. Accounts connected to TikTok's official API (optional,
+    through the panel Worker) use that instead. If neither works, the video count on the public
+    profile page still tells that something new was uploaded.
     """
     entries: dict[str, dict] = state.setdefault("tiktok", {})
     wanted = {account.lower(): account for account in config.accounts}
@@ -661,6 +709,14 @@ def check_tiktok(config: TikTokConfig, state: dict, webhook: Webhook, now: datet
             if videos is not None:
                 changes += announce_videos(config, entries.setdefault(handle, {}), account, videos, webhook)
                 continue
+        try:
+            listed = list_videos(handle)
+        except (HttpError, urllib.error.URLError, TimeoutError, TikTokError, ValueError) as e:
+            warn(f"TikTok @{handle}: urlebird isn't answering ({e}); counting videos instead")
+        else:
+            changes += announce_videos(config, entries.setdefault(handle, {}), account, listed, webhook,
+                                       details=lambda video, handle=handle: details(handle, video))
+            continue
         try:
             profile = fetch(handle)
         except (HttpError, urllib.error.URLError, TimeoutError, TikTokError, ValueError, KeyError) as e:
@@ -755,7 +811,7 @@ def report(config: Config, state: dict, changes: list[str], changed: bool) -> No
         rows = [f"| {login} | {'🔴 live' if login in live else 'offline'} |" for login in config.streamers]
         for account in config.tiktok.accounts:
             entry = state.get("tiktok", {}).get(account.lower(), {})
-            status = "official API" if "seen" in entry else f"{entry.get('video_count', '?')} videos"
+            status = "watching new videos" if "seen" in entry else f"{entry.get('video_count', '?')} videos"
             rows.append(f"| TikTok @{account} | {status} |")
         with open(step_summary, "a", encoding="utf-8") as f:
             f.write("\n".join(["| Account | Status |", "|---|---|", *rows]) + "\n")
