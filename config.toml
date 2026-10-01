@@ -20,6 +20,7 @@ watch_button = true
 accounts = [
     "renaissance.guild",
     "thezunkist",
+    "_ganzalf",
 ]
 ping = ""
 name = "Lil Nao"
