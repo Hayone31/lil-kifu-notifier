@@ -19,6 +19,7 @@ watch_button = true
 # appear in Discord, e.g. "BeagleMommy". Accounts are checked about every 15 minutes.
 accounts = [
     "renaissance.guild",
+    "thezunkist",
 ]
 ping = ""
 name = "Lil Nao"
