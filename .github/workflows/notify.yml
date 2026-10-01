@@ -4,6 +4,9 @@ on:
   schedule:
     - cron: "*/5 * * * *"  # every 5 minutes; GitHub may start scheduled runs a few minutes late
   workflow_dispatch:       # "Run workflow" button for a check right now
+  push:
+    branches: [main]
+    paths: [config.toml]   # check right away after the settings change
 
 permissions:
   contents: write          # commit state.json
@@ -19,13 +22,14 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      - name: Check Twitch and update Discord
+      - name: Check Twitch and TikTok, update Discord
         id: notify
         run: python3 notify.py
         env:
           TWITCH_CLIENT_ID: ${{ secrets.TWITCH_CLIENT_ID }}
           TWITCH_CLIENT_SECRET: ${{ secrets.TWITCH_CLIENT_SECRET }}
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          DISCORD_TIKTOK_WEBHOOK_URL: ${{ secrets.DISCORD_TIKTOK_WEBHOOK_URL }}
 
       - name: Save state
         if: steps.notify.outputs.changed == 'true'

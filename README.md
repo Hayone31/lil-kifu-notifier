@@ -1,54 +1,78 @@
-# Lil Kifu
+# Lil Kifu & Lil Nao
 
-Twitch go-live notifications for a Discord channel, with no server to run. GitHub Actions checks Twitch
-every 5 minutes and posts through a Discord webhook. When the stream ends, the same message is edited:
+Discord notifications for your community's streamers, with no server to run. GitHub Actions does the
+checking and posts through Discord webhooks:
 
-| While live | After the stream |
-|---|---|
-| **CarolinaWWM** is live on Twitch! | **CarolinaWWM** was live. The stream has ended. |
-| *CarolinaWWM is live on Twitch*<br>**[Stream title](https://twitch.tv)**<br>Playing **Game**<br>profile picture, live preview, `Watch Stream` button | *CarolinaWWM was live on Twitch*<br>**[Stream ended](https://twitch.tv)**<br>CarolinaWWM's stream has ended.<br>time the stream ended |
+- **Lil Kifu** posts when a Twitch streamer goes live and edits the same message when the stream ends.
+- **Lil Nao** posts when a TikTok account uploads something new.
 
-## Add or remove streamers
+| Lil Kifu, while live | Lil Kifu, after the stream | Lil Nao |
+|---|---|---|
+| **CarolinaWWM** is live on Twitch!<br>stream title, game, profile picture, live preview, `Watch Stream` button | **CarolinaWWM** was live. The stream has ended.<br>"Stream ended" with the time it ended | **BeagleMommy uploaded a new TikTok!**<br>profile picture, `View on TikTok` button |
 
-Edit [`config.toml`](config.toml) on GitHub (pencil icon), change the `streamers` list and commit.
-The next check uses the new list. The same file sets who gets pinged, the name and avatar of the
-messages, and the Watch Stream button.
+## Add or remove accounts
+
+Edit [`config.toml`](config.toml) on GitHub (pencil icon) and commit. A check runs right away.
+
+- `[twitch] streamers`: the Twitch usernames Lil Kifu watches.
+- `[tiktok] accounts`: the TikTok usernames Lil Nao watches. Write each one the way it should
+  appear in Discord, e.g. `"BeagleMommy"`.
+
+Each section also sets who gets pinged (nobody by default), the name and avatar of the messages, and
+Twitch's Watch Stream button.
 
 ## Setup
 
-1. **Discord webhook:** open the channel's settings, go to **Integrations → Webhooks → New Webhook**,
-   name it *Lil Kifu*, upload the avatar and click **Copy Webhook URL**.
-2. **Twitch app:** open https://dev.twitch.tv/console/apps and click **Register Your Application**.
-   Use OAuth redirect `http://localhost`, category *Application Integration*, client type *Confidential*.
-   Copy the **Client ID**, then click **New Secret** and copy the secret.
+1. **Discord webhooks:** in the channel settings, go to **Integrations → Webhooks → New Webhook**.
+   Create one named *Lil Kifu* and one named *Lil Nao*, give them their avatars and copy both URLs.
+   They can post in the same channel or in different ones. You can move a webhook to another channel
+   later without its URL changing.
+2. **Twitch app:** at https://dev.twitch.tv/console/apps, click **Register Your Application**. Use
+   OAuth redirect `http://localhost`, category *Application Integration* and client type
+   *Confidential*. Copy the Client ID and click **New Secret**.
 3. **Repository secrets:** go to **Settings → Secrets and variables → Actions → New repository secret**
-   and add `DISCORD_WEBHOOK_URL`, `TWITCH_CLIENT_ID` and `TWITCH_CLIENT_SECRET`.
-4. **First run:** go to **Actions → Twitch notifications → Run workflow**. After that it runs on its own every 5 minutes.
+   and add these four:
+   - `DISCORD_WEBHOOK_URL`: the Lil Kifu webhook
+   - `DISCORD_TIKTOK_WEBHOOK_URL`: the Lil Nao webhook
+   - `TWITCH_CLIENT_ID`
+   - `TWITCH_CLIENT_SECRET`
+4. **First run:** go to **Actions → Twitch notifications → Run workflow**. After that, it runs every
+   5 minutes on its own.
 
 ## How it works
 
-- Each run takes a few seconds. It gets a Twitch app token, asks which streamers are live and updates
-  Discord. At the end it revokes the token.
-- `state.json` remembers which live messages are open. The workflow commits it whenever something
-  changes, so the commit history doubles as a stream log. Don't edit it by hand.
-- A stream counts as ended once it has been missing on two checks in a row, which protects against
-  Twitch hiccups and stream crashes. A stream that comes back within that window keeps its message.
-- When the streamer keeps VODs, the end time shown in Discord comes from the VOD. Otherwise it is the
-  time of the first check that saw the stream offline.
-- If Twitch or Discord is down, the run logs a warning and the next run tries again. Wrong secrets fail
-  the run, and GitHub emails you about failed runs.
+- **Twitch:** each run gets a Twitch app token, asks which streamers are live, updates Discord and
+  revokes the token.
+  - A stream counts as ended after it has been missing on two checks in a row. A crash and a quick
+    reconnect keep the same message.
+  - The end time shown comes from the stream's VOD when the streamer keeps VODs.
+- **TikTok:** TikTok has no free API for this, and it hides the list of videos from data-centre IPs
+  like GitHub's. A public profile still shows how many videos the account has, so Lil Nao reads that
+  number about every 15 minutes and posts when it goes up. This has three consequences:
+  - The message can't include the video's caption or cover. The button opens the profile, where the
+    newest video is at the top.
+  - If a video is deleted and a new one is posted between two checks, the count stays the same and
+    that post is missed.
+  - TikTok can change its pages at any time. If it does, TikTok checks log warnings until the code is
+    adjusted. Twitch keeps working either way.
+- `state.json` remembers open live messages and the last known TikTok counts. The workflow commits
+  it when something changes, so the commit history doubles as a log. Don't edit it by hand.
+- **Errors:**
+  - When Twitch, TikTok or Discord is down, the run logs a warning and the next run tries again.
+  - Wrong or missing secrets fail the run, and GitHub emails you about failed runs.
+  - A missing `DISCORD_TIKTOK_WEBHOOK_URL` only skips TikTok.
 
 ## Limits
 
-- GitHub runs scheduled workflows every 5 minutes at best. When GitHub is busy, runs can start 10-20
-  minutes late, and the notifications arrive late with them.
-- GitHub pauses scheduled workflows in repositories with no activity for 60 days. The workflow commits
-  `state.json` at least every 25 days to prevent that. If the schedule does get paused, re-enable it in
+- GitHub runs scheduled workflows every 5 minutes at best. When GitHub is busy, runs can start
+  10-20 minutes late.
+- GitHub pauses scheduled workflows in repositories with no activity for 60 days. The workflow
+  commits `state.json` at least every 25 days to prevent that. If it is ever paused, re-enable it in
   the Actions tab.
-- The repository is public because Actions minutes are only free without limit for public
+- The repository is public because GitHub Actions minutes are free and unlimited only in public
   repositories. Secrets stay private. `config.toml` and `state.json` are visible to anyone.
 
 ## Local test run
 
-Put the three secrets in a `.env` file next to `notify.py` (one `NAME=value` per line) and run
+Put the secrets in a `.env` file next to `notify.py`, one `NAME=value` per line, and run
 `python notify.py`. Run the tests with `python -m pytest`; they need only pytest.

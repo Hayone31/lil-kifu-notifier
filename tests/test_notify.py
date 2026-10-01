@@ -39,6 +39,8 @@ class FakeTwitch:
 
 
 class FakeWebhook:
+    secret_name = "DISCORD_WEBHOOK_URL"
+
     def __init__(self):
         self.sent, self.edits = [], []
         self.fail_send = self.fail_edit = None
@@ -279,15 +281,116 @@ def test_webhook_token_never_appears_in_errors():
 
 def test_config(tmp_path):
     path = tmp_path / "config.toml"
-    path.write_text('streamers = ["CarolinaWWM", "twitch.tv/carolinawwm", "@IIGreyl"]\nping = "<@&123>"\n',
-                    encoding="utf-8")
+    path.write_text(
+        '[twitch]\nstreamers = ["CarolinaWWM", "twitch.tv/carolinawwm", "@IIGreyl"]\nping = "<@&123>"\n'
+        '[tiktok]\naccounts = ["BeagleMommy", "https://www.tiktok.com/@beaglemommy", "@some.one_2"]\n'
+        'name = "Lil Nao"\n', encoding="utf-8")
     config = notify.load_config(path)
     assert config.streamers == ("carolinawwm", "iigreyl")
     assert (config.ping, config.name, config.watch_button) == ("123", "", True)
-    for bad in ('streamers = ["no spaces allowed"]', 'ping = "mods"', "streamers = ["):
+    assert config.tiktok.accounts == ("BeagleMommy", "some.one_2")
+    assert (config.tiktok.ping, config.tiktok.name) == ("", "Lil Nao")
+    for bad in ('streamers = ["no spaces allowed"]', '[twitch]\nping = "mods"', "streamers = [",
+                '[tiktok]\naccounts = ["no spaces"]', '[tiktok]\nping = "x"'):
         path.write_text(bad, encoding="utf-8")
         with pytest.raises(ConfigError):
             notify.load_config(path)
+
+
+def test_config_without_sections_still_works(tmp_path):
+    path = tmp_path / "config.toml"
+    path.write_text('streamers = ["carolinawwm"]\nname = "Lil Kifu"\n', encoding="utf-8")
+    config = notify.load_config(path)
+    assert (config.streamers, config.name, config.tiktok.accounts) == (("carolinawwm",), "Lil Kifu", ())
+
+
+# --- TikTok -------------------------------------------------------------------------------------
+
+TIKTOK_CONFIG = notify.TikTokConfig(accounts=("BeagleMommy",), name="Lil Nao")
+ON_TIME = datetime(2026, 10, 1, 12, 2, tzinfo=timezone.utc)     # minute 2: a TikTok check is due
+OFF_TIME = datetime(2026, 10, 1, 12, 7, tzinfo=timezone.utc)    # minute 7: not due
+
+
+class FakeTikTok:
+    def __init__(self, count=104):
+        self.count = count
+        self.fail = None
+        self.calls = 0
+
+    def __call__(self, handle):
+        self.calls += 1
+        assert handle == "beaglemommy"
+        if self.fail:
+            raise self.fail
+        return {"video_count": self.count, "avatar": "https://cdn/avatar.jpg"}
+
+
+def test_tiktok_lifecycle():
+    state, hook, tiktok = {"streams": {}}, FakeWebhook(), FakeTikTok()
+    run = lambda at, **kw: notify.check_tiktok(TIKTOK_CONFIG, state, hook, at, fetch=tiktok, **kw)
+
+    assert run(OFF_TIME) == []  # a new account is looked at right away, but only remembered
+    assert state["tiktok"] == {"beaglemommy": {"video_count": 104}} and hook.sent == []
+
+    tiktok.count = 105
+    assert run(OFF_TIME) == [] and tiktok.calls == 1  # not due yet
+    assert run(ON_TIME) == ["BeagleMommy uploaded a new TikTok"]
+    assert hook.sent == [{
+        "embeds": [{"title": "BeagleMommy uploaded a new TikTok!", "color": 0xDB4263,
+                    "thumbnail": {"url": "https://cdn/avatar.jpg"}}],
+        "components": [{"type": 1, "components": [
+            {"type": 2, "style": 5, "label": "View on TikTok", "url": "https://www.tiktok.com/@beaglemommy"}]}],
+        "allowed_mentions": {"parse": []},
+        "username": "Lil Nao",
+    }]
+
+    tiktok.count = 104  # a video was deleted: follow the count down quietly
+    assert run(ON_TIME) == [] and state["tiktok"]["beaglemommy"]["video_count"] == 104
+    tiktok.count = 107
+    assert run(OFF_TIME, force=True) == ["BeagleMommy uploaded a new TikTok"]
+    assert hook.sent[-1]["embeds"][0]["title"] == "BeagleMommy uploaded 3 new TikToks!"
+
+
+def test_tiktok_failures_are_retried():
+    state, hook, tiktok = {"streams": {}, "tiktok": {"beaglemommy": {"video_count": 104}}}, FakeWebhook(), FakeTikTok(105)
+    tiktok.fail = notify.TikTokError("blocked")
+    assert notify.check_tiktok(TIKTOK_CONFIG, state, hook, ON_TIME, fetch=tiktok) == []
+    hook.fail_send = HttpError(503, "down", "x")
+    tiktok.fail = None
+    assert notify.check_tiktok(TIKTOK_CONFIG, state, hook, ON_TIME, fetch=tiktok) == []
+    assert state["tiktok"]["beaglemommy"]["video_count"] == 104  # not counted as announced
+    assert notify.check_tiktok(TIKTOK_CONFIG, state, hook, ON_TIME, fetch=tiktok) == ["BeagleMommy uploaded a new TikTok"]
+
+
+def test_tiktok_role_ping_and_removed_accounts():
+    payload = notify.tiktok_message(notify.TikTokConfig(ping="555"), "BeagleMommy", "", 1)
+    assert payload["content"] == "<@&555>" and payload["allowed_mentions"] == {"parse": [], "roles": ["555"]}
+    assert "thumbnail" not in payload["embeds"][0] and "username" not in payload
+    state = {"streams": {}, "tiktok": {"gone": {"video_count": 1}}}
+    notify.check_tiktok(notify.TikTokConfig(), state, FakeWebhook(), ON_TIME, fetch=FakeTikTok())
+    assert state["tiktok"] == {}
+
+
+def test_tiktok_profile_page_parsing(monkeypatch):
+    data = {"__DEFAULT_SCOPE__": {"webapp.user-detail": {"statusCode": 0, "userInfo": {
+        "user": {"uniqueId": "beaglemommy", "avatarLarger": "https://cdn/big.jpg"},
+        "stats": {"videoCount": 104}, "itemList": []}}}}
+    page = f'<html><script id="__UNIVERSAL_DATA_FOR_REHYDRATION__" type="application/json">{json.dumps(data)}</script></html>'
+    monkeypatch.setattr(notify, "http", lambda *a, **kw: page)
+    assert notify.tiktok_profile("beaglemommy") == {"video_count": 104, "avatar": "https://cdn/big.jpg"}
+    data["__DEFAULT_SCOPE__"]["webapp.user-detail"]["statusCode"] = 10221
+    page = f'<script id="__UNIVERSAL_DATA_FOR_REHYDRATION__">{json.dumps(data)}</script>'
+    with pytest.raises(notify.TikTokError, match="10221"):
+        notify.tiktok_profile("beaglemommy")
+    page = "<html>captcha</html>"
+    with pytest.raises(notify.TikTokError, match="no data"):
+        notify.tiktok_profile("beaglemommy")
+
+
+def test_parse_tiktok():
+    assert notify.parse_tiktok("@BeagleMommy") == "BeagleMommy"
+    assert notify.parse_tiktok("https://www.tiktok.com/@some.one_2?lang=en") == "some.one_2"
+    assert notify.parse_tiktok("two words") is None
 
 
 def test_state_is_only_written_when_it_changes(tmp_path):
@@ -304,15 +407,19 @@ def test_state_is_only_written_when_it_changes(tmp_path):
 def apis():
     calls = []
     live = {"1": stream()}
+    tiktok = SimpleNamespace(count=104)
 
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, *args):
             pass
 
-        def reply(self, status, payload):
-            raw = b"" if payload is None else json.dumps(payload).encode()
+        def reply(self, status, payload, content_type="application/json"):
+            if payload is None:
+                raw = b""
+            else:
+                raw = (payload if isinstance(payload, str) else json.dumps(payload)).encode()
             self.send_response(status)
-            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Type", content_type)
             self.send_header("Content-Length", str(len(raw)))
             self.end_headers()
             self.wfile.write(raw)
@@ -331,13 +438,21 @@ def apis():
                 return self.reply(200, {"access_token": "tok", "expires_in": 3600, "token_type": "bearer"})
             if self.path == "/oauth2/revoke":
                 return self.reply(200, None)
+            if self.path == "/api/webhooks/2/tiktoktoken?wait=true&with_components=true":
+                return self.reply(200, {"id": "777"})
             assert self.path == "/api/webhooks/1/hooktoken?wait=true&with_components=true"
-            if sum(1 for call in calls if call[1].startswith("/api/webhooks")) == 1:
+            if sum(1 for call in calls if call[1].startswith("/api/webhooks/1/")) == 1:
                 return self.reply(429, {"message": "You are being rate limited.", "retry_after": 0.05})
             return self.reply(200, {"id": "999"})
 
         def do_GET(self):
             calls.append(("GET", self.path, ""))
+            if self.path == "/@beaglemommy":
+                assert self.headers["User-Agent"].startswith("Mozilla/5.0")
+                data = {"__DEFAULT_SCOPE__": {"webapp.user-detail": {"statusCode": 0, "userInfo": {
+                    "user": {"avatarLarger": "https://cdn/beagle.jpg"}, "stats": {"videoCount": tiktok.count}}}}}
+                page = f'<script id="__UNIVERSAL_DATA_FOR_REHYDRATION__" type="application/json">{json.dumps(data)}</script>'
+                return self.reply(200, page, "text/html; charset=utf-8")
             assert self.headers["Authorization"] == "Bearer tok" and self.headers["Client-Id"] == "cid"
             url = urlparse(self.path)
             query = parse_qs(url.query)
@@ -349,40 +464,70 @@ def apis():
 
     server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
     threading.Thread(target=server.serve_forever, daemon=True).start()
-    yield SimpleNamespace(base=f"http://127.0.0.1:{server.server_address[1]}", calls=calls, live=live)
+    yield SimpleNamespace(base=f"http://127.0.0.1:{server.server_address[1]}", calls=calls, live=live, tiktok=tiktok)
     server.shutdown()
 
 
 @pytest.fixture
 def repo(tmp_path, monkeypatch, apis):
-    (tmp_path / "config.toml").write_text('streamers = ["carolinawwm"]\n', encoding="utf-8")
+    (tmp_path / "config.toml").write_text(
+        '[twitch]\nstreamers = ["carolinawwm"]\n[tiktok]\naccounts = ["BeagleMommy"]\nname = "Lil Nao"\n',
+        encoding="utf-8")
     monkeypatch.setattr(notify, "ROOT", tmp_path)
     monkeypatch.setattr(notify, "TWITCH_TOKEN_URL", f"{apis.base}/oauth2/token")
     monkeypatch.setattr(notify, "TWITCH_REVOKE_URL", f"{apis.base}/oauth2/revoke")
     monkeypatch.setattr(notify, "TWITCH_API", f"{apis.base}/helix")
+    monkeypatch.setattr(notify, "TIKTOK_PROFILE_URL", f"{apis.base}/@{{}}")
     monkeypatch.setattr(notify, "DISCORD_API", f"{apis.base}/api")
     monkeypatch.setenv("TWITCH_CLIENT_ID", "cid")
     monkeypatch.setenv("TWITCH_CLIENT_SECRET", "secret")
     monkeypatch.setenv("DISCORD_WEBHOOK_URL", "https://discord.com/api/webhooks/1/hooktoken")
+    monkeypatch.setenv("DISCORD_TIKTOK_WEBHOOK_URL", "https://discord.com/api/webhooks/2/tiktoktoken")
     monkeypatch.setenv("GITHUB_OUTPUT", str(tmp_path / "output"))
     monkeypatch.setenv("GITHUB_STEP_SUMMARY", str(tmp_path / "summary.md"))
+    monkeypatch.delenv("GITHUB_EVENT_NAME", raising=False)
     return tmp_path
 
 
-def test_main_posts_and_saves_state(repo, apis):
+def webhook_posts(apis, number):
+    return [json.loads(call[2]) for call in apis.calls
+            if call[0] == "POST" and call[1].startswith(f"/api/webhooks/{number}/")]
+
+
+def test_main_posts_and_saves_state(repo, apis, monkeypatch):
     assert notify.main() == 0
     state = json.loads((repo / "state.json").read_text(encoding="utf-8"))
     assert state["streams"]["1"]["message_id"] == "999"
+    assert state["tiktok"] == {"beaglemommy": {"video_count": 104}}  # first look: remembered, not announced
     assert "keepalive" in state
     assert (repo / "output").read_text(encoding="utf-8") == "changed=true\nsummary=CarolinaWWM went live\n"
-    assert "| carolinawwm | 🔴 live |" in (repo / "summary.md").read_text(encoding="utf-8")
-    webhook_calls = [call for call in apis.calls if call[1].startswith("/api/webhooks")]
-    assert len(webhook_calls) == 2  # the first one got a 429 and was retried
-    assert apis.calls[-1][1] == "/oauth2/revoke"  # the run's token is revoked at the end
+    summary = (repo / "summary.md").read_text(encoding="utf-8")
+    assert "| carolinawwm | 🔴 live |" in summary and "| TikTok @BeagleMommy | 104 videos |" in summary
+    assert len(webhook_posts(apis, 1)) == 2  # the first one got a 429 and was retried
+    assert webhook_posts(apis, 2) == []
+    assert ("POST", "/oauth2/revoke") in [call[:2] for call in apis.calls]  # the run's token is revoked
 
     # next run: still live, nothing to do, nothing to commit
     assert notify.main() == 0
     assert (repo / "output").read_text(encoding="utf-8").endswith("changed=false\nsummary=Update state\n")
+
+    # a new TikTok, checked right away because the run was started by hand
+    apis.tiktok.count = 105
+    monkeypatch.setenv("GITHUB_EVENT_NAME", "workflow_dispatch")
+    assert notify.main() == 0
+    [post] = webhook_posts(apis, 2)
+    assert post["username"] == "Lil Nao" and post["embeds"][0]["title"] == "BeagleMommy uploaded a new TikTok!"
+    assert post["allowed_mentions"] == {"parse": []} and "content" not in post
+    assert (repo / "output").read_text(encoding="utf-8").endswith(
+        "changed=true\nsummary=BeagleMommy uploaded a new TikTok\n")
+
+
+def test_main_without_tiktok_webhook_still_does_twitch(repo, monkeypatch, capsys):
+    monkeypatch.delenv("DISCORD_TIKTOK_WEBHOOK_URL")
+    assert notify.main() == 0
+    assert "DISCORD_TIKTOK_WEBHOOK_URL is not set" in capsys.readouterr().out
+    state = json.loads((repo / "state.json").read_text(encoding="utf-8"))
+    assert state["streams"]["1"]["message_id"] == "999" and "tiktok" not in state
 
 
 def test_main_reports_wrong_twitch_secret(repo, monkeypatch, capsys):

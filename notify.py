@@ -1,11 +1,13 @@
-"""Lil Kifu: Twitch go-live notifications for Discord, run by GitHub Actions.
+"""Lil Kifu & Lil Nao: Twitch and TikTok notifications for Discord, run by GitHub Actions.
 
 Each run asks Twitch which streamers in config.toml are live, then posts, updates or ends their
-messages through a Discord webhook. Open live messages are remembered in state.json, which the
-workflow commits back to the repository whenever it changes.
+messages through a Discord webhook (Lil Kifu). About every 15 minutes it also checks the TikTok
+accounts in config.toml and announces new posts through a second webhook (Lil Nao). What it has
+seen is remembered in state.json, which the workflow commits back whenever it changes.
 
-Needs TWITCH_CLIENT_ID, TWITCH_CLIENT_SECRET and DISCORD_WEBHOOK_URL in the environment
-(repository secrets on GitHub, or a .env file next to this script for local test runs).
+Needs TWITCH_CLIENT_ID, TWITCH_CLIENT_SECRET, DISCORD_WEBHOOK_URL and, for TikTok,
+DISCORD_TIKTOK_WEBHOOK_URL in the environment (repository secrets on GitHub, or a .env file next
+to this script for local test runs).
 """
 from __future__ import annotations
 
@@ -18,7 +20,7 @@ import tomllib
 import urllib.error
 import urllib.parse
 import urllib.request
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -27,23 +29,33 @@ ROOT = Path(__file__).resolve().parent
 TWITCH_TOKEN_URL = "https://id.twitch.tv/oauth2/token"
 TWITCH_REVOKE_URL = "https://id.twitch.tv/oauth2/revoke"
 TWITCH_API = "https://api.twitch.tv/helix"
+TIKTOK_PROFILE_URL = "https://www.tiktok.com/@{}"
 DISCORD_API = "https://discord.com/api/v10"
 USER_AGENT = "DiscordBot (https://github.com, 1.0) LilKifu"
+BROWSER_UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) "
+              "Chrome/130.0 Safari/537.36")
 
 TWITCH_PURPLE = 0x9146FF
 ENDED_GRAY = 0x57606A                # border colour of the "ended" embeds in the reference screenshot
+TIKTOK_RED = 0xDB4263                # border colour of the TikTok embed in the reference screenshot
 MISSES_TO_END = 2                    # checks in a row a stream must be missing before it counts as ended
 RESTART_GAP = timedelta(minutes=10)  # a new stream this soon after the last one keeps the same message
+TIKTOK_EVERY = 15                    # minutes between TikTok checks; TikTok blocks clients that ask often
 KEEPALIVE = timedelta(days=25)       # commit at least this often; GitHub pauses idle schedules after 60 days
 UNKNOWN_WEBHOOK, UNKNOWN_MESSAGE = 10015, 10008  # Discord error codes
 
 _LOGIN_RE = re.compile(r"[A-Za-z0-9_]{1,25}")
+_TIKTOK_RE = re.compile(r"[A-Za-z0-9_.]{2,24}")
 _WEBHOOK_RE = re.compile(
     r"https://(?:(?:canary|ptb)\.)?discord(?:app)?\.com/api(?:/v\d+)?/webhooks/(\d+)/([\w-]+)/?")
 
 
 class ConfigError(Exception):
     """Something the repository owner has to fix: settings or secrets."""
+
+
+class TikTokError(Exception):
+    """A TikTok profile couldn't be read."""
 
 
 class HttpError(Exception):
@@ -63,8 +75,8 @@ class HttpError(Exception):
 # --- HTTP ---------------------------------------------------------------------------------------
 
 def http(method: str, url: str, *, headers: dict | None = None, form: dict | None = None,
-         json_body: dict | None = None):
-    """Send a request and return the decoded JSON (None for an empty body). Waits out short 429s."""
+         json_body: dict | None = None, text: bool = False):
+    """Send a request and return the decoded JSON (or the text). Waits out short 429s."""
     headers = {"User-Agent": USER_AGENT, **(headers or {})}
     data = None
     if json_body is not None:
@@ -78,6 +90,8 @@ def http(method: str, url: str, *, headers: dict | None = None, form: dict | Non
         try:
             with urllib.request.urlopen(request, timeout=20) as response:
                 raw = response.read()
+            if text:
+                return raw.decode("utf-8", errors="replace")
             return json.loads(raw) if raw else None
         except urllib.error.HTTPError as e:
             body = e.read().decode(errors="replace")
@@ -105,7 +119,7 @@ def _redact(url: str) -> str:
     return re.sub(r"(/webhooks/\d+/)[^/?]+", r"\1***", url)
 
 
-# --- Twitch and Discord -------------------------------------------------------------------------
+# --- Twitch, TikTok and Discord -----------------------------------------------------------------
 
 class Twitch:
     def __init__(self, client_id: str, client_secret: str) -> None:
@@ -152,11 +166,33 @@ class Twitch:
             pass
 
 
+def tiktok_profile(handle: str) -> dict:
+    """Video count and avatar from a public TikTok profile page.
+
+    TikTok hides the list of videos from data-centre IPs such as GitHub's, but the profile page
+    still carries the account's stats, so a growing video count is how new posts are spotted.
+    """
+    html = http("GET", TIKTOK_PROFILE_URL.format(handle), text=True,
+                headers={"User-Agent": BROWSER_UA, "Accept-Language": "en-US,en;q=0.9"})
+    match = re.search(r'<script id="__UNIVERSAL_DATA_FOR_REHYDRATION__"[^>]*>(.*?)</script>', html, re.S)
+    if not match:
+        raise TikTokError("the profile page has no data (TikTok changed it or blocked the request)")
+    detail = json.loads(match.group(1)).get("__DEFAULT_SCOPE__", {}).get("webapp.user-detail") or {}
+    if detail.get("statusCode") != 0:
+        raise TikTokError(f"TikTok answered with status {detail.get('statusCode')} (account missing or private?)")
+    user, stats = detail["userInfo"]["user"], detail["userInfo"]["stats"]
+    return {
+        "video_count": int(stats["videoCount"]),
+        "avatar": user.get("avatarLarger") or user.get("avatarMedium") or "",
+    }
+
+
 class Webhook:
-    def __init__(self, url: str) -> None:
+    def __init__(self, url: str, secret_name: str = "DISCORD_WEBHOOK_URL") -> None:
         match = _WEBHOOK_RE.fullmatch(url.strip())
         if not match:
-            raise ConfigError("DISCORD_WEBHOOK_URL is not a Discord webhook URL")
+            raise ConfigError(f"{secret_name} is not a Discord webhook URL")
+        self.secret_name = secret_name
         self.base = f"{DISCORD_API}/webhooks/{match[1]}/{match[2]}"
 
     def send(self, payload: dict) -> str:
@@ -169,12 +205,21 @@ class Webhook:
 # --- Settings and state -------------------------------------------------------------------------
 
 @dataclass(frozen=True)
+class TikTokConfig:
+    accounts: tuple[str, ...] = ()  # spelled as in config.toml; that spelling is shown in Discord
+    ping: str = ""
+    name: str = ""
+    avatar_url: str = ""
+
+
+@dataclass(frozen=True)
 class Config:
     streamers: tuple[str, ...]
     ping: str = ""           # "", "everyone" or a role id
     name: str = ""           # overrides the webhook's name when set
     avatar_url: str = ""     # overrides the webhook's avatar when set
     watch_button: bool = True
+    tiktok: TikTokConfig = field(default_factory=TikTokConfig)
 
 
 def parse_login(text: str) -> str | None:
@@ -187,28 +232,59 @@ def parse_login(text: str) -> str | None:
     return text.lower() if _LOGIN_RE.fullmatch(text) else None
 
 
+def parse_tiktok(text: str) -> str | None:
+    """Turn 'Name', '@Name' or a tiktok.com/@Name link into a handle, keeping its spelling."""
+    text = text.strip()
+    match = re.search(r"tiktok\.com/@([A-Za-z0-9_.]+)", text, re.IGNORECASE)
+    if match:
+        text = match.group(1)
+    text = text.lstrip("@")
+    return text if _TIKTOK_RE.fullmatch(text) else None
+
+
+def _parse_ping(value: object, section: str) -> str:
+    ping = re.sub(r"[<@&>\s]", "", str(value or "")).lower()
+    if ping not in ("", "everyone") and not ping.isdigit():
+        raise ConfigError(f'config.toml [{section}]: ping must be "", "everyone" or a role ID')
+    return ping
+
+
 def load_config(path: Path | None = None) -> Config:
     path = path or ROOT / "config.toml"
     try:
         raw = tomllib.loads(path.read_text(encoding="utf-8"))
     except tomllib.TOMLDecodeError as e:
         raise ConfigError(f"config.toml has a syntax error: {e}") from None
+    twitch = raw.get("twitch", raw)  # older files kept the Twitch settings at the top level
     streamers: list[str] = []
-    for item in raw.get("streamers", []):
+    for item in twitch.get("streamers", []):
         login = parse_login(str(item))
         if login is None:
             raise ConfigError(f"config.toml: {item!r} is not a Twitch username")
         if login not in streamers:
             streamers.append(login)
-    ping = re.sub(r"[<@&>\s]", "", str(raw.get("ping", ""))).lower()
-    if ping not in ("", "everyone") and not ping.isdigit():
-        raise ConfigError('config.toml: ping must be "", "everyone" or a role ID')
+
+    tiktok = raw.get("tiktok", {})
+    accounts: list[str] = []
+    for item in tiktok.get("accounts", []):
+        handle = parse_tiktok(str(item))
+        if handle is None:
+            raise ConfigError(f"config.toml: {item!r} is not a TikTok username")
+        if handle.lower() not in {account.lower() for account in accounts}:
+            accounts.append(handle)
+
     return Config(
         streamers=tuple(streamers),
-        ping=ping,
-        name=str(raw.get("name", "")).strip()[:80],
-        avatar_url=str(raw.get("avatar_url", "")).strip(),
-        watch_button=bool(raw.get("watch_button", True)),
+        ping=_parse_ping(twitch.get("ping"), "twitch"),
+        name=str(twitch.get("name", "")).strip()[:80],
+        avatar_url=str(twitch.get("avatar_url", "")).strip(),
+        watch_button=bool(twitch.get("watch_button", True)),
+        tiktok=TikTokConfig(
+            accounts=tuple(accounts),
+            ping=_parse_ping(tiktok.get("ping"), "tiktok"),
+            name=str(tiktok.get("name", "")).strip()[:80],
+            avatar_url=str(tiktok.get("avatar_url", "")).strip(),
+        ),
     )
 
 
@@ -276,6 +352,10 @@ def allowed_mentions(ping: str) -> dict:
     return {"parse": []}
 
 
+def _link_button(label: str, url: str) -> list[dict]:
+    return [{"type": 1, "components": [{"type": 2, "style": 5, "label": label, "url": url}]}]
+
+
 def live_embed(stream: dict, started_at: str, profile: str, now: datetime) -> dict:
     name, login = stream["user_name"], stream["user_login"]
     embed = {
@@ -304,8 +384,7 @@ def live_message(config: Config, stream: dict, profile: str, now: datetime) -> d
         "allowed_mentions": allowed_mentions(config.ping),
     }
     if config.watch_button:
-        payload["components"] = [{"type": 1, "components": [
-            {"type": 2, "style": 5, "label": "Watch Stream", "url": channel_url(stream["user_login"])}]}]
+        payload["components"] = _link_button("Watch Stream", channel_url(stream["user_login"]))
     if config.name:
         payload["username"] = config.name
     if config.avatar_url:
@@ -329,7 +408,26 @@ def ended_message(name: str, login: str, ended_at: datetime) -> dict:
     }
 
 
-# --- One check ----------------------------------------------------------------------------------
+def tiktok_message(config: TikTokConfig, account: str, avatar: str, new_posts: int) -> dict:
+    what = "a new TikTok" if new_posts == 1 else f"{new_posts} new TikToks"
+    embed = {"title": _cut(f"{account} uploaded {what}!", 256), "color": TIKTOK_RED}
+    if avatar:
+        embed["thumbnail"] = {"url": avatar}
+    payload = {
+        "embeds": [embed],
+        "components": _link_button("View on TikTok", TIKTOK_PROFILE_URL.format(account.lower())),
+        "allowed_mentions": allowed_mentions(config.ping),
+    }
+    if config.ping:
+        payload["content"] = ping_text(config.ping)
+    if config.name:
+        payload["username"] = config.name
+    if config.avatar_url:
+        payload["avatar_url"] = config.avatar_url
+    return payload
+
+
+# --- Twitch check -------------------------------------------------------------------------------
 
 def check(config: Config, state: dict, twitch: Twitch, webhook: Webhook, now: datetime) -> list[str]:
     """Compare who is live with state.json and update Discord. Returns a line per visible change."""
@@ -371,9 +469,7 @@ def check(config: Config, state: dict, twitch: Twitch, webhook: Webhook, now: da
                     entries[user_id] = post_message(config, webhook, stream, user, now)
                     changes.append(f"{name} went live")
         except HttpError as e:
-            if e.discord_code == UNKNOWN_WEBHOOK or e.status == 401:
-                raise ConfigError("Discord doesn't accept the webhook anymore. Create a new one and "
-                                  "update the DISCORD_WEBHOOK_URL secret") from None
+            _raise_if_webhook_gone(e, webhook)
             warn(f"{name}: {e} (trying again next run)")
         except (urllib.error.URLError, TimeoutError) as e:
             warn(f"{name}: {e} (trying again next run)")
@@ -448,6 +544,49 @@ def _stream_end(twitch: Twitch, user_id: str, stream_id: str) -> datetime | None
         return None
 
 
+def _raise_if_webhook_gone(error: HttpError, webhook: Webhook) -> None:
+    if error.discord_code == UNKNOWN_WEBHOOK or error.status == 401:
+        raise ConfigError(f"Discord doesn't accept the webhook anymore. Create a new one and update the "
+                          f"{webhook.secret_name} secret") from None
+
+
+# --- TikTok check -------------------------------------------------------------------------------
+
+def check_tiktok(config: TikTokConfig, state: dict, webhook: Webhook, now: datetime, *,
+                 force: bool = False, fetch=tiktok_profile) -> list[str]:
+    """Announce new TikTok posts. Accounts are looked at about every TIKTOK_EVERY minutes."""
+    entries: dict[str, dict] = state.setdefault("tiktok", {})
+    wanted = {account.lower(): account for account in config.accounts}
+    for handle in list(entries):
+        if handle not in wanted:
+            del entries[handle]
+    due = force or now.minute % TIKTOK_EVERY < 5
+    changes: list[str] = []
+    for handle, account in wanted.items():
+        if not due and handle in entries:
+            continue
+        try:
+            profile = fetch(handle)
+        except (HttpError, urllib.error.URLError, TimeoutError, TikTokError, ValueError, KeyError) as e:
+            warn(f"TikTok @{handle}: {e} (trying again later)")
+            continue
+        entry = entries.get(handle)
+        if entry is None:  # first look at this account: remember where it stands, announce nothing
+            entries[handle] = {"video_count": profile["video_count"]}
+            continue
+        new_posts = profile["video_count"] - entry["video_count"]
+        if new_posts > 0:
+            try:
+                webhook.send(tiktok_message(config, account, profile["avatar"], new_posts))
+            except HttpError as e:
+                _raise_if_webhook_gone(e, webhook)
+                warn(f"TikTok @{handle}: {e} (trying again later)")
+                continue  # the count stays as it was, so the next check announces it
+            changes.append(f"{account} uploaded a new TikTok")
+        entry["video_count"] = profile["video_count"]  # also follows deleted videos down
+    return changes
+
+
 # --- Entry point --------------------------------------------------------------------------------
 
 def warn(message: str) -> None:
@@ -472,6 +611,42 @@ def required_env(name: str) -> str:
     return value
 
 
+def run_twitch(config: Config, state: dict, now: datetime) -> list[str]:
+    """Raises ConfigError for things the owner must fix; outages only produce warnings."""
+    webhook = Webhook(required_env("DISCORD_WEBHOOK_URL"))
+    client_id, client_secret = required_env("TWITCH_CLIENT_ID"), required_env("TWITCH_CLIENT_SECRET")
+    try:
+        twitch = Twitch(client_id, client_secret)
+    except HttpError as e:
+        if e.status in (400, 401, 403):
+            raise ConfigError("Twitch rejected TWITCH_CLIENT_ID / TWITCH_CLIENT_SECRET") from None
+        warn(f"Twitch is unreachable right now ({e}); trying again next run")
+        return []
+    except (urllib.error.URLError, TimeoutError) as e:
+        warn(f"Twitch is unreachable right now ({e}); trying again next run")
+        return []
+    try:
+        return check(config, state, twitch, webhook, now)
+    except (HttpError, urllib.error.URLError, TimeoutError) as e:
+        # Nothing was posted yet when the Twitch lookups fail, so it's safe to just try again later.
+        warn(f"Couldn't ask Twitch who is live ({e}); trying again next run")
+        return []
+    finally:
+        twitch.close()
+
+
+def run_tiktok(config: Config, state: dict, now: datetime, force: bool) -> list[str]:
+    if not config.tiktok.accounts:
+        state.pop("tiktok", None)
+        return []
+    url = os.environ.get("DISCORD_TIKTOK_WEBHOOK_URL", "").strip()
+    if not url:
+        warn("DISCORD_TIKTOK_WEBHOOK_URL is not set, so TikTok accounts are skipped")
+        return []
+    webhook = Webhook(url, "DISCORD_TIKTOK_WEBHOOK_URL")
+    return check_tiktok(config.tiktok, state, webhook, now, force=force)
+
+
 def report(config: Config, state: dict, changes: list[str], changed: bool) -> None:
     for line in changes:
         print(line)
@@ -482,8 +657,10 @@ def report(config: Config, state: dict, changes: list[str], changed: bool) -> No
     if step_summary := os.environ.get("GITHUB_STEP_SUMMARY"):
         live = {entry["login"] for entry in state["streams"].values()}
         rows = [f"| {login} | {'🔴 live' if login in live else 'offline'} |" for login in config.streamers]
+        rows += [f"| TikTok @{account} | {state.get('tiktok', {}).get(account.lower(), {}).get('video_count', '?')} videos |"
+                 for account in config.tiktok.accounts]
         with open(step_summary, "a", encoding="utf-8") as f:
-            f.write("\n".join(["| Streamer | Status |", "|---|---|", *rows]) + "\n")
+            f.write("\n".join(["| Account | Status |", "|---|---|", *rows]) + "\n")
 
 
 def main() -> int:
@@ -492,41 +669,24 @@ def main() -> int:
     state_path = ROOT / "state.json"
     try:
         config = load_config()
-        webhook = Webhook(required_env("DISCORD_WEBHOOK_URL"))
-        client_id, client_secret = required_env("TWITCH_CLIENT_ID"), required_env("TWITCH_CLIENT_SECRET")
     except ConfigError as e:
         print(f"::error::{e}")
         return 1
     state = load_state(state_path)
-
-    try:
-        twitch = Twitch(client_id, client_secret)
-    except HttpError as e:
-        if e.status in (400, 401, 403):
-            print("::error::Twitch rejected TWITCH_CLIENT_ID / TWITCH_CLIENT_SECRET")
-            return 1
-        warn(f"Twitch is unreachable right now ({e}); trying again next run")
-        return 0
-    except (urllib.error.URLError, TimeoutError) as e:
-        warn(f"Twitch is unreachable right now ({e}); trying again next run")
-        return 0
-
-    try:
-        changes = check(config, state, twitch, webhook, now)
-    except ConfigError as e:
-        print(f"::error::{e}")
-        return 1
-    except (HttpError, urllib.error.URLError, TimeoutError) as e:
-        # Nothing was posted yet when the Twitch lookups fail, so it's safe to just try again later.
-        warn(f"Couldn't ask Twitch who is live ({e}); trying again next run")
-        return 0
-    finally:
-        twitch.close()
+    exit_code = 0
+    changes: list[str] = []
+    force_tiktok = os.environ.get("GITHUB_EVENT_NAME") in ("workflow_dispatch", "push")
+    for run in (lambda: run_twitch(config, state, now), lambda: run_tiktok(config, state, now, force_tiktok)):
+        try:
+            changes += run()
+        except ConfigError as e:
+            print(f"::error::{e}")
+            exit_code = 1
 
     if not state.get("keepalive") or now - parse_time(state["keepalive"]) >= KEEPALIVE:
         state["keepalive"] = iso(now)
     report(config, state, changes, save_state(state, state_path))
-    return 0
+    return exit_code
 
 
 if __name__ == "__main__":
