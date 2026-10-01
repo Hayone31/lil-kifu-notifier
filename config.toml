@@ -2,9 +2,7 @@
 
 [twitch]
 # Lil Kifu announces when these Twitch streamers go live (usernames or twitch.tv links).
-streamers = [
-    "ohnepixel",
-]
+streamers = []
 # Who gets pinged: "" for nobody, "everyone", or a role ID
 # (Discord: turn on Developer Mode, then Server Settings > Roles > right-click a role > Copy Role ID).
 ping = ""
