@@ -22,8 +22,7 @@ the admin who runs a command sees the answer.
 | `/twitch list` | The Twitch list, showing who is live right now. |
 | `/tiktok add <account>` | Lil Nao announces this TikTok account. The name is checked on TikTok first. |
 | `/tiktok remove <account>` | Stop announcing it. |
-| `/tiktok list` | The TikTok list, with each account's video count and whether it's connected to TikTok. |
-| `/tiktok connect <account>` | A one-time link for the account's owner. Opening it once gives Lil Nao the video's caption, cover and a direct link. |
+| `/tiktok list` | The TikTok list with each account's video count. |
 
 The commands are answered by a small Cloudflare Worker in [`panel/`](panel). It commits each
 change to `config.toml`, and that commit starts a check right away. Nothing runs on anyone's PC.
@@ -79,8 +78,10 @@ Twitch's Watch Stream button.
   - A stream counts as ended after it has been missing on two checks in a row. A crash and a quick
     reconnect keep the same message.
   - The end time shown comes from the stream's VOD when the streamer keeps VODs.
-- **TikTok, connected accounts:** after an admin runs `/tiktok connect <account>`, the account's
-  owner opens the link once, logs in to TikTok and allows access. That uses TikTok's official API.
+- **TikTok, connected accounts (optional, not set up):** this needs a TikTok for Developers app,
+  `WITH_TIKTOK_CONNECT=1` when running `register.mjs`, and `api = "<worker URL>"` under `[tiktok]`.
+  After an admin runs `/tiktok connect <account>`, the account's owner opens the link once, logs in
+  to TikTok and allows access. That uses TikTok's official API.
   - The panel Worker keeps the tokens in Cloudflare and refreshes them. The approval lasts a year.
   - It checks that the person logging in really is that account. Each link works once, for 24 hours.
   - Lil Nao then posts each new video with its caption, cover and a direct link, about every 15

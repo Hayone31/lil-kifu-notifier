@@ -23,5 +23,3 @@ accounts = [
 ping = ""
 name = "Lil Nao"
 avatar_url = ""
-# The panel Worker. It reads TikTok's official API for accounts connected with /tiktok connect.
-api = "https://lil-kifu-panel.lil-kifu-panel.workers.dev"
