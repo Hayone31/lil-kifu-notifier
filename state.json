@@ -77,12 +77,12 @@
           "id": "7692018108256570646",
           "message_id": "1555531217930035413",
           "posted_at": "2026-10-02T10:45:39+00:00",
-          "refreshes": 0,
+          "refreshes": 1,
           "stats": {
-            "comments": 2,
-            "likes": 7,
-            "shares": 63,
-            "views": 12
+            "comments": 8,
+            "likes": 32,
+            "shares": 68,
+            "views": 105
           }
         }
       ],
