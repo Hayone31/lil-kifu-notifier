@@ -81,12 +81,12 @@
           "id": "7692084386077904150",
           "message_id": "1555595416391909461",
           "posted_at": "2026-10-02T15:00:44+00:00",
-          "refreshes": 0,
+          "refreshes": 1,
           "stats": {
-            "comments": 0,
-            "likes": 3,
-            "shares": 0,
-            "views": 7
+            "comments": 16,
+            "likes": 61,
+            "shares": 68,
+            "views": 170
           }
         }
       ],
