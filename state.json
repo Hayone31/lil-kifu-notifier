@@ -1,10 +1,22 @@
 {
   "keepalive": "2026-10-01T14:08:07+00:00",
-  "streams": {},
+  "streams": {
+    "922376993": {
+      "game": "AION 2",
+      "login": "loskirin",
+      "message_id": "1556131434882801767",
+      "misses": 0,
+      "missing_since": null,
+      "name": "loskirin",
+      "profile": "https://static-cdn.jtvnw.net/jtv_user_pictures/e1c172b1-7b20-4b97-9933-0dd2f5690659-profile_image-300x300.png",
+      "started_at": "2026-10-04T02:29:18Z",
+      "stream_id": "318873621606",
+      "title": "ranger grind | mby some wwm arena on alt later |"
+    }
+  },
   "tiktok": {
     "_ganzalf": {
       "seen": [
-        "20261004101544156144",
         "7691341011531894038",
         "7690553431894789398",
         "7686831640210935062",
@@ -12,6 +24,7 @@
         "7685106425986583830",
         "7684238292459605270",
         "7683619171430616342",
+        "20261004101544156144",
         "202610040845470616",
         "2026100408304411523",
         "202610040430462401",
