@@ -1,6 +1,19 @@
 {
   "keepalive": "2026-10-01T14:08:07+00:00",
-  "streams": {},
+  "streams": {
+    "922376993": {
+      "game": "Where Winds Meet",
+      "login": "loskirin",
+      "message_id": "1557005921060921408",
+      "misses": 0,
+      "missing_since": null,
+      "name": "loskirin",
+      "profile": "https://static-cdn.jtvnw.net/jtv_user_pictures/e1c172b1-7b20-4b97-9933-0dd2f5690659-profile_image-300x300.png",
+      "started_at": "2026-10-06T12:24:35Z",
+      "stream_id": "318707282919",
+      "title": "full dao night shift pvp"
+    }
+  },
   "tiktok": {
     "_ganzalf": {
       "seen": [
