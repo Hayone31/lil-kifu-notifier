@@ -1,6 +1,19 @@
 {
   "keepalive": "2026-10-01T14:08:07+00:00",
-  "streams": {},
+  "streams": {
+    "922376993": {
+      "game": "Where Winds Meet",
+      "login": "loskirin",
+      "message_id": "1557311802881212447",
+      "misses": 0,
+      "missing_since": null,
+      "name": "loskirin",
+      "profile": "https://static-cdn.jtvnw.net/jtv_user_pictures/e1c172b1-7b20-4b97-9933-0dd2f5690659-profile_image-300x300.png",
+      "started_at": "2026-10-07T08:35:45Z",
+      "stream_id": "318855680229",
+      "title": "fanbrella arc continues #WhereWindsMeet #WWMCIES12"
+    }
+  },
   "tiktok": {
     "_ganzalf": {
       "posted": [
