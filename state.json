@@ -1,19 +1,6 @@
 {
   "keepalive": "2026-10-01T14:08:07+00:00",
-  "streams": {
-    "922376993": {
-      "game": "Where Winds Meet",
-      "login": "loskirin",
-      "message_id": "1559440872695660559",
-      "misses": 1,
-      "missing_since": "2026-10-13T10:21:16+00:00",
-      "name": "loskirin",
-      "profile": "https://static-cdn.jtvnw.net/jtv_user_pictures/e1c172b1-7b20-4b97-9933-0dd2f5690659-profile_image-300x300.png",
-      "started_at": "2026-10-13T05:39:18Z",
-      "stream_id": "318927160165",
-      "title": "smol gup practing kite for next szn #WhereWindsMeet #WWMCIES12"
-    }
-  },
+  "streams": {},
   "tiktok": {
     "_ganzalf": {
       "seen": [
