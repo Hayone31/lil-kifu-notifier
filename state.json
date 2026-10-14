@@ -527,12 +527,12 @@
           "id": "7696480330953411872",
           "message_id": "1559887533041647644",
           "posted_at": "2026-10-14T11:15:57+00:00",
-          "refreshes": 0,
+          "refreshes": 1,
           "stats": {
             "comments": 0,
-            "likes": 0,
+            "likes": 1,
             "shares": 0,
-            "views": 0
+            "views": 17
           }
         }
       ],
