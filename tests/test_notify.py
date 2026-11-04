@@ -16,6 +16,11 @@ CAROL = {"id": "1", "login": "carolinawwm", "display_name": "CarolinaWWM",
          "profile_image_url": "https://cdn/pfp.png"}
 
 
+@pytest.fixture(autouse=True)
+def no_pause(monkeypatch):
+    monkeypatch.setattr(notify, "URLEBIRD_PAUSE", 0)
+
+
 def stream(stream_id="s1", title="Ranked grind", game="VALORANT", started_at="2026-10-01T11:55:00Z"):
     return {"id": stream_id, "user_id": "1", "user_login": "carolinawwm", "user_name": "CarolinaWWM",
             "title": title, "game_name": game, "started_at": started_at,
@@ -479,50 +484,110 @@ def test_switching_between_api_and_counting_never_reannounces():
                                               "video_count": 110} and hook.sent == []
 
 
-def counter(kind, count):
-    return {"@type": "InteractionCounter", "interactionType": {"@type": f"http://schema.org/{kind}"},
-            "userInteractionCount": count}
+def urlebird_card(video_id, author="renaissance.guild", caption="More than a guild...", cover=None, slug="",
+                  views="561", likes="28", comments="7"):
+    """A video card the way urlebird.com really writes it, with its commented-out avatar block."""
+    link = f"https://urlebird.com/video/{slug}{video_id}/"
+    return f"""<div class="thumb wc">
+        <!--<div class="author text-right"> <a href="https://urlebird.com/user/{author}/"><img src="https://cdn/avatar.webp?x-expires=1" alt="{author}"></a> </div>-->
+        <div class="img"><img src="{cover or f'https://i.axod.net/{video_id}.webp'}" class="img-fluid" alt="@Someone"></div>
+        <div class="stats">
+            <div class="flex items-center mb-1"><span><i class="fas fa-clock" aria-hidden="true"></i> 14 hours ago</span></div>
+            <div class="flex items-center mb-1"><span><i class="fas fa-play" aria-hidden="true"></i> {views}</span></div>
+            <div class="flex items-center mb-1"><span><i class="fas fa-heart" aria-hidden="true"></i> {likes}</span></div>
+            <div class="flex items-center mb-1"><span><i class="fas fa-comment" aria-hidden="true"></i> {comments}</span></div>
+        </div>
+        <div class="info3">
+            <div class="author-name"><a href="https://urlebird.com/user/{author}/">@{author}</a></div>
+            <a href="{link}"><span>{caption}</span></a>
+        </div>
+        <a href="{link}"><div class="overlay-s"></div></a>
+        <div class="overlay-shadow"></div>
+    </div><div class="d-block"><iframe src="//ad.a-ads.com/2374085?size=300x250"></iframe></div>"""
 
 
-URLEBIRD_JSON_LD = json.dumps({"@context": "https://schema.org", "@type": "ItemList", "itemListElement": [
-    {"position": "1", "@type": "VideoObject", "url": "https://urlebird.com/video/more-than-a-guild-7686796925315697952/",
-     "interactionStatistic": [counter("WatchAction", 561), counter("LikeAction", 28), counter("CommentAction", 7),
-                              counter("ShareAction", 18)]}]})
-URLEBIRD_PAGE = f"""<html><head><title>Renaissance Guild WWM (@renaissance.guild) - Urlebird</title>
-<script type="application/ld+json">{URLEBIRD_JSON_LD}</script></head><body>
-<a href="https://urlebird.com/video/more-than-a-guild-7686796925315697952/">More than a guild</a>
-<a href='https://urlebird.com/video/first-post-7600000000000000001/'><img></a>
-<a href="https://urlebird.com/user/renaissance.guild/">profile</a></body></html>"""
+def urlebird_page(*cards, handle="renaissance.guild"):
+    return f"<html><head><title>Guild (@{handle}) - Urlebird</title></head><body>{''.join(cards)}</body></html>"
+
+
+def urlebird_video_page(caption="More than a guild #wwm #fy", author="renaissance.guild"):
+    return (f'<head><meta property="og:title" content="{caption}" />'
+            f'<meta property="og:description" content="561 views | {caption}  | Guild (@{author})" />'
+            '<meta property="og:image" content="https://i.axod.net/often-a-404.webp" /></head>')
 
 
 def test_urlebird_page_parsing(monkeypatch):
-    page = URLEBIRD_PAGE
+    page = urlebird_page(
+        urlebird_card("7600000000000000001", caption="#Lebensfreude #Genie&amp;szlig...", likes="1.98K", comments="1,204",
+                      views="2.3M"),
+        urlebird_card("7686796925315697952", slug="more-than-a-guild-", cover="https://i.axod.net/a.webp?x=1&amp;y=2"),
+        urlebird_card("7699999999999999999", author="someone.else"),  # another account's video: never ours
+        # TikTok's own file links aren't videos, although their numbers look like ids
+        '<video src="https://v19e.tiktokcdn.com/abc/video/tos/useast2a/x/?a=1340&l=20261101133306561441"></video>')
     monkeypatch.setattr(notify, "http", lambda *args, **kwargs: page)
     videos = notify.urlebird_videos("renaissance.guild")
     assert [v["id"] for v in videos] == ["7686796925315697952", "7600000000000000001"]  # newest first
     assert datetime.fromtimestamp(videos[0]["created"], timezone.utc).date().isoformat() == "2026-09-18"
-    assert videos[0]["stats"] == {"views": 561, "likes": 28, "comments": 7, "shares": 18}
-    assert "stats" not in videos[1]
+    assert videos[0] == {"id": "7686796925315697952", "created": videos[0]["created"],
+                         "page": "more-than-a-guild-7686796925315697952", "cover": "https://i.axod.net/a.webp?x=1&y=2",
+                         "caption": "More than a guild...", "stats": {"views": 561, "likes": 28, "comments": 7}}
+    assert videos[1]["caption"] == "#Lebensfreude #Genieß..."  # urlebird escapes some captions twice
+    assert videos[1]["stats"] == {"views": 2_300_000, "likes": 1980, "comments": 1204}
+    assert videos[1]["cover"] == "https://i.axod.net/7600000000000000001.webp"  # the cover, not the avatar before it
+
+    page = urlebird_page()  # an account without videos is fine
+    assert notify.urlebird_videos("renaissance.guild") == []
     page = "<html><title>Just a moment...</title></html>"  # e.g. a bot check instead of the profile
     with pytest.raises(notify.TikTokError, match="unexpected page"):
         notify.urlebird_videos("renaissance.guild")
+    # A new layout must be loud: reading it as "no videos" would silently stop every post.
+    page = urlebird_page('<li class="card"><a href="https://urlebird.com/video/7686796925315697952/">clip</a></li>')
+    with pytest.raises(notify.TikTokError, match="none can be read"):
+        notify.urlebird_videos("renaissance.guild")
 
 
-def test_tiktok_video_details_checks_the_author(monkeypatch):
-    seen_urls = []
+def test_tiktok_video_details_adds_the_link_and_the_full_caption(monkeypatch):
+    urls = []
 
     def fake_http(method, url, **kwargs):
-        seen_urls.append(url)
-        return {"author_unique_id": author, "title": "More than a guild #wwm", "thumbnail_url": "https://cdn/c.jpg"}
+        urls.append(url)
+        return page
     monkeypatch.setattr(notify, "http", fake_http)
-    author = "renaissance.guild"
-    details = notify.tiktok_video_details("renaissance.guild", {"id": "7686796925315697952", "created": 1})
-    assert details == {"id": "7686796925315697952", "created": 1, "caption": "More than a guild #wwm",
-                       "cover": "https://cdn/c.jpg", "url": "https://www.tiktok.com/@renaissance.guild/video/7686796925315697952"}
-    assert seen_urls[0] == ("https://www.tiktok.com/oembed?url=https%3A%2F%2Fwww.tiktok.com%2F%40renaissance.guild"
-                            "%2Fvideo%2F7686796925315697952")
-    author = "someone.else"
-    assert notify.tiktok_video_details("renaissance.guild", {"id": "1", "created": 1}) is None
+    listed = {"id": "7686796925315697952", "created": 1, "page": "more-than-a-guild-7686796925315697952",
+              "caption": "More than a...", "cover": "https://i.axod.net/a.webp", "stats": {"likes": 1}}
+    link = "https://www.tiktok.com/@renaissance.guild/video/7686796925315697952"
+
+    page = urlebird_video_page("More than a guild #Genie&amp;szlig;")
+    assert notify.tiktok_video_details("renaissance.guild", listed) == {**listed, "caption": "More than a guild #Genieß", "url": link}
+    assert urls == ["https://urlebird.com/video/more-than-a-guild-7686796925315697952/"]
+    assert notify.tiktok_video_details("Renaissance.Guild", listed) is not None  # capitals in the handle don't matter
+    page = urlebird_video_page(author="someone.else")  # the page clearly names another account
+    assert notify.tiktok_video_details("renaissance.guild", listed) is None
+
+    # Links hold the caption in any script, which Python's HTTP client refuses unless it is encoded.
+    urls.clear()
+    page = urlebird_video_page()
+    notify.tiktok_video_details("renaissance.guild", {**listed, "page": "한글-clip-7686796925315697952"})
+    notify.tiktok_video_details("renaissance.guild", {**listed, "page": "%ED%95%9C-clip-7686796925315697952"})
+    assert urls == ["https://urlebird.com/video/%ED%95%9C%EA%B8%80-clip-7686796925315697952/",
+                    "https://urlebird.com/video/%ED%95%9C-clip-7686796925315697952/"]
+
+
+def test_a_page_that_says_less_never_costs_a_post(monkeypatch, capsys):
+    """Regression: TikTok's oEmbed lost its author field and every new video was silently taken for someone else's."""
+    listed = {"id": "7686796925315697952", "created": 1, "caption": "More than a...", "cover": "https://i.axod.net/a.webp"}
+    expected = {**listed, "url": "https://www.tiktok.com/@renaissance.guild/video/7686796925315697952"}
+    monkeypatch.setattr(notify, "http", lambda *args, **kwargs: "<html>a page without any of those tags</html>")
+    assert notify.tiktok_video_details("renaissance.guild", listed) == expected
+    assert capsys.readouterr().out == ""
+
+    def down(*args, **kwargs):
+        raise error
+    monkeypatch.setattr(notify, "http", down)
+    for error in (HttpError(404, "gone", "x"), HttpError(429, "Just a moment...", "x"), TimeoutError("timed out"),
+                  UnicodeEncodeError("ascii", "한", 0, 1, "ordinal not in range")):
+        assert notify.tiktok_video_details("renaissance.guild", listed) == expected
+        assert "using the short caption" in capsys.readouterr().out
 
 
 class FakeListing:
@@ -536,7 +601,7 @@ class FakeListing:
         return [{"id": video(n)["id"], "created": video(n)["created"]} for n in sorted(self.numbers, reverse=True)]
 
 
-def test_urlebird_and_oembed_post_caption_cover_and_link():
+def test_new_videos_post_caption_cover_and_link(capsys):
     state, hook, listing = {"streams": {}, "tiktok": {"beaglemommy": {"video_count": 104}}}, FakeWebhook(), FakeListing(1)
     failures = {}
 
@@ -559,14 +624,31 @@ def test_urlebird_and_oembed_post_caption_cover_and_link():
                                  "description": "clip 2", "image": {"url": "https://cdn/cover2.jpg"}}
     assert post["components"][0]["components"][0]["url"] == f"https://www.tiktok.com/@beaglemommy/video/{video(2)['id']}"
     assert video(3)["id"] in state["tiktok"]["beaglemommy"]["seen"]  # skipped, not retried
+    assert f"skipping video {video(3)['id']}, it belongs to another account" in capsys.readouterr().out  # never silently
 
     listing.numbers = [1, 2, 3, 4, 5]
-    failures[video(4)["id"]] = HttpError(404, "{}", "x")  # gone again: just counts as seen
-    failures[video(5)["id"]] = HttpError(503, "{}", "x")  # TikTok hiccup: tried again next time
+    failures[video(4)["id"]] = HttpError(404, "{}", "x")  # any failure is tried again: a video is never lost to one
+    failures[video(5)["id"]] = HttpError(503, "{}", "x")
     assert run() == []
-    del failures[video(5)["id"]]
-    assert run() == ["BeagleMommy uploaded a new TikTok"] and hook.sent[-1]["embeds"][0]["description"] == "clip 5"
+    failures.clear()
+    assert run() == ["BeagleMommy uploaded a new TikTok"] * 2
+    assert [p["embeds"][0]["description"] for p in hook.sent[-2:]] == ["clip 4", "clip 5"]
     assert run() == []
+
+
+def test_one_accounts_crash_doesnt_stop_the_others():
+    config = notify.TikTokConfig(accounts=("Broken", "Fine"))
+    state = {"streams": {}, "tiktok": {"broken": {"seen": []}, "fine": {"seen": []}}}
+    hook = FakeWebhook()
+
+    def details(handle, item):
+        if handle == "broken":
+            raise RuntimeError("an odd video")
+        return {**item, "caption": "c", "url": "u"}
+    with pytest.raises(RuntimeError, match="an odd video"):  # the run still fails, so the owner gets an email
+        notify.check_tiktok(config, state, hook, ON_TIME, fetch=FakeTikTok(), list_videos=FakeListing(1), details=details)
+    assert len(hook.sent) == 1 and state["tiktok"]["fine"]["seen"] == [video(1)["id"]]
+    assert state["tiktok"]["broken"]["seen"] == []  # tried again next time
 
 
 def test_urlebird_down_falls_back_to_counting(capsys):
@@ -813,16 +895,12 @@ def apis():
             if self.path == "/user/beaglemommy/":
                 if tiktok.urlebird is None:
                     return self.reply(404, None)
-                links = "".join(f'<a href="https://urlebird.com/video/clip-{i}/">x</a>' for i in tiktok.urlebird)
-                ld = json.dumps({"@type": "ItemList", "itemListElement": [
-                    {"@type": "VideoObject", "url": f"https://urlebird.com/video/clip-{i}/",
-                     "interactionStatistic": [counter("LikeAction", 5), counter("CommentAction", 2)]} for i in tiktok.urlebird]})
-                page = f'<title>Brandy (@beaglemommy) - Urlebird</title><script type="application/ld+json">{ld}</script>{links}'
-                return self.reply(200, page, "text/html")
-            if self.path.startswith("/oembed?url="):
-                video_id = parse_qs(urlparse(self.path).query)["url"][0].rsplit("/", 1)[1]
-                return self.reply(200, {"author_unique_id": "beaglemommy", "title": f"caption of {video_id}",
-                                        "thumbnail_url": f"https://cdn/{video_id}.jpg"})
+                cards = [urlebird_card(i, author="beaglemommy", caption="short", cover=f"https://cdn/{i}.jpg", slug="clip-",
+                                       views="9", likes="5", comments="2") for i in tiktok.urlebird]
+                return self.reply(200, urlebird_page(*cards, handle="BeagleMommy"), "text/html")
+            if self.path.startswith("/video/clip-"):
+                video_id = self.path.rstrip("/").rsplit("-", 1)[1]
+                return self.reply(200, urlebird_video_page(f"caption of {video_id}", "beaglemommy"), "text/html")
             if self.path.startswith("/tiktok/videos?account="):
                 if tiktok.videos is None:
                     return self.reply(404, {"connected": False})
@@ -867,7 +945,7 @@ def repo(tmp_path, monkeypatch, apis):
     monkeypatch.setattr(notify, "TWITCH_API", f"{apis.base}/helix")
     monkeypatch.setattr(notify, "TIKTOK_PROFILE_URL", f"{apis.base}/@{{}}")
     monkeypatch.setattr(notify, "URLEBIRD_URL", f"{apis.base}/user/{{}}/")
-    monkeypatch.setattr(notify, "TIKTOK_OEMBED_URL", f"{apis.base}/oembed?url={{}}")
+    monkeypatch.setattr(notify, "URLEBIRD_VIDEO_URL", f"{apis.base}/video/{{}}/")
     monkeypatch.setattr(notify, "DISCORD_API", f"{apis.base}/api")
     monkeypatch.setenv("TWITCH_CLIENT_ID", "cid")
     monkeypatch.setenv("TWITCH_CLIENT_SECRET", "secret")
@@ -929,7 +1007,7 @@ def test_main_finds_new_tiktoks_through_urlebird(repo, apis, monkeypatch):
     assert post["components"][0]["components"][0]["url"] == "https://www.tiktok.com/@beaglemommy/video/7690000000000000001"
     assert post["username"] == "Lil Nao" and post["allowed_mentions"] == {"parse": []}
     [followed] = json.loads((repo / "state.json").read_text(encoding="utf-8"))["tiktok"]["beaglemommy"]["posted"]
-    assert (followed["id"], followed["message_id"], followed["stats"]) == ("7690000000000000001", "777", {"likes": 5, "comments": 2})
+    assert (followed["id"], followed["message_id"], followed["stats"]) == ("7690000000000000001", "777", {"views": 9, "likes": 5, "comments": 2})
 
 
 def test_main_with_tiktoks_official_api(repo, apis, monkeypatch):
@@ -958,6 +1036,17 @@ def test_timer_runs_keep_tiktok_at_its_own_pace(repo, apis, monkeypatch):
     assert notify.main() == 0
     assert webhook_posts(apis, 2) == []
     monkeypatch.setenv("RUN_SOURCE", "manual")
+    assert notify.main() == 0
+    assert len(webhook_posts(apis, 2)) == 1
+
+
+def test_github_backup_schedule_always_looks_at_tiktok(repo, apis, monkeypatch):
+    """Regression: with the panel's timer down, GitHub's late runs almost never fell on a quarter hour."""
+    monkeypatch.setattr(notify, "tiktok_due", lambda now: False)
+    monkeypatch.setenv("RUN_SOURCE", "manual")
+    assert notify.main() == 0  # first look at the account
+    apis.tiktok.count = 105
+    monkeypatch.setenv("RUN_SOURCE", "schedule")
     assert notify.main() == 0
     assert len(webhook_posts(apis, 2)) == 1
 

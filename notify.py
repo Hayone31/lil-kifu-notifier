@@ -24,6 +24,7 @@ import urllib.parse
 import urllib.request
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta, timezone
+from html import unescape
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
@@ -32,8 +33,8 @@ TWITCH_TOKEN_URL = "https://id.twitch.tv/oauth2/token"
 TWITCH_REVOKE_URL = "https://id.twitch.tv/oauth2/revoke"
 TWITCH_API = "https://api.twitch.tv/helix"
 TIKTOK_PROFILE_URL = "https://www.tiktok.com/@{}"
-TIKTOK_OEMBED_URL = "https://www.tiktok.com/oembed?url={}"
 URLEBIRD_URL = "https://urlebird.com/user/{}/"
+URLEBIRD_VIDEO_URL = "https://urlebird.com/video/{}/"
 DISCORD_API = "https://discord.com/api/v10"
 USER_AGENT = "DiscordBot (https://github.com, 1.0) LilKifu"
 BROWSER_UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) "
@@ -48,6 +49,7 @@ TIKTOK_EVERY = 15                    # minutes between TikTok checks; TikTok blo
 LIST_KEEP = 20                       # newest videos looked at per TikTok account
 SEEN_KEEP = 60                       # video ids remembered per TikTok account (must stay above LIST_KEEP)
 MAX_POSTS_PER_CHECK = 3              # never flood the channel, e.g. after a long outage
+URLEBIRD_PAUSE = 2                   # seconds before each request to urlebird, which answers bursts with 429s
 # A new video has hardly any likes yet, so its post is updated this long after posting.
 STATS_REFRESH = (timedelta(hours=1), timedelta(hours=3), timedelta(hours=6), timedelta(hours=24))
 KEEPALIVE = timedelta(days=25)       # commit at least this often; GitHub pauses idle schedules after 60 days
@@ -57,6 +59,8 @@ _LOGIN_RE = re.compile(r"[A-Za-z0-9_]{1,25}")
 _TIKTOK_RE = re.compile(r"[A-Za-z0-9_.]{2,24}")
 _WEBHOOK_RE = re.compile(
     r"https://(?:(?:canary|ptb)\.)?discord(?:app)?\.com/api(?:/v\d+)?/webhooks/(\d+)/([\w-]+)/?")
+# /video/<id>/ or /video/<caption-slug>-<id>/. Not TikTok's /video/tos/... file links, whose numbers aren't ids.
+_URLEBIRD_LINK_RE = re.compile(r'href="[^"]*/video/([^"/]*?(\d{18,20}))/"')
 
 
 class ConfigError(Exception):
@@ -179,58 +183,80 @@ def urlebird_videos(handle: str) -> list[dict]:
     """Recent videos of a TikTok account, newest first, read from urlebird.com.
 
     TikTok hides its video lists from data-centre IPs such as GitHub's; urlebird, a public TikTok
-    viewer, still shows them. A TikTok video id carries its upload time in the upper 32 bits.
+    viewer, still shows them. Each video is a card naming its author, with a short caption, the
+    cover and the counts. A page full of cards that can't be read is an error, never "no videos".
     """
-    html = http("GET", URLEBIRD_URL.format(handle), text=True,
-                headers={"User-Agent": BROWSER_UA, "Accept-Language": "en-US,en;q=0.9"})
+    html = _urlebird_page(URLEBIRD_URL.format(handle))
     if f"@{handle.lower()}" not in html.lower():
         raise TikTokError("urlebird answered with an unexpected page (blocked or changed?)")
-    ids = sorted({int(found) for found in re.findall(r'/video/[^"\'\s>]*?(\d{18,20})', html)}, reverse=True)
-    stats = _urlebird_stats(html)
-    return [{"id": str(video_id), "created": video_id >> 32, **({"stats": stats[str(video_id)]} if str(video_id) in stats else {})}
-            for video_id in ids]
+    videos = {}
+    for card in html.split('<div class="img">')[1:]:
+        video = _urlebird_card(card)
+        if video and video.pop("author") == handle.lower():  # the page can also show other accounts' videos
+            videos[video["id"]] = video
+    if not videos and _URLEBIRD_LINK_RE.search(html):
+        raise TikTokError("urlebird's page has videos but none can be read (did its layout change?)")
+    return sorted(videos.values(), key=lambda video: int(video["id"]), reverse=True)
 
 
-def _urlebird_stats(html: str) -> dict[str, dict]:
-    """Likes, comments, views and shares per video id, from the page's schema.org data."""
-    names = {"LikeAction": "likes", "CommentAction": "comments", "WatchAction": "views", "ShareAction": "shares"}
-    found: dict[str, dict] = {}
-    for block in re.findall(r'<script[^>]+application/ld\+json[^>]*>(.*?)</script>', html, re.S):
-        try:
-            data = json.loads(block)
-        except ValueError:
-            continue
-        pending = [data]
-        while pending:
-            item = pending.pop()
-            if isinstance(item, list):
-                pending.extend(item)
-                continue
-            if not isinstance(item, dict):
-                continue
-            pending.extend(item.values())
-            video_id = re.search(r"(\d{18,20})/?$", str(item.get("url", ""))) if item.get("@type") == "VideoObject" else None
-            if not video_id:
-                continue
-            counts = {}
-            for counter in item.get("interactionStatistic") or []:
-                kind = counter.get("interactionType") if isinstance(counter, dict) else None
-                kind = kind.get("@type") if isinstance(kind, dict) else kind
-                name = names.get(str(kind).rsplit("/", 1)[-1])
-                if name and isinstance(counter.get("userInteractionCount"), int):
-                    counts[name] = counter["userInteractionCount"]
-            if counts:
-                found[video_id[1]] = counts
-    return found
+def _urlebird_page(url: str) -> str:
+    time.sleep(URLEBIRD_PAUSE)
+    return http("GET", url, text=True, headers={"User-Agent": BROWSER_UA, "Accept-Language": "en-US,en;q=0.9"})
+
+
+def _urlebird_card(card: str) -> dict | None:
+    link = _URLEBIRD_LINK_RE.search(card)
+    author = re.search(r'class="author-name">\s*<a href="[^"]*/user/([^/"]+)/"', card)
+    if not link or not author:
+        return None
+    # A TikTok video id carries its upload time in the upper 32 bits.
+    video = {"id": link[2], "created": int(link[2]) >> 32, "author": author[1].lower(), "page": link[1]}
+    if cover := re.search(r'<img src="([^"]+)"', card):
+        video["cover"] = unescape(cover[1])
+    if caption := re.search(r'/video/[^"]*"[^>]*>\s*<span>(.*?)</span>', card, re.S):
+        video["caption"] = _page_text(caption[1])
+    stats = {}
+    for icon, name in (("play", "views"), ("heart", "likes"), ("comment", "comments")):
+        if count := re.search(rf'fa-{icon}"[^>]*></i>\s*([\d.,]+[KMB]?)', card):
+            stats[name] = _urlebird_count(count[1])
+    if stats:
+        video["stats"] = stats
+    return video
+
+
+def _urlebird_count(text: str) -> int:
+    """urlebird shows 95, 1.98K or 2.3M."""
+    scale = {"K": 1_000, "M": 1_000_000, "B": 1_000_000_000}.get(text[-1], 1)
+    return round(float(text.rstrip("KMB").replace(",", "")) * scale)
+
+
+def _page_text(text: str) -> str:
+    """Text from a urlebird page, which sometimes escapes captions twice (Genie&amp;szlig;)."""
+    return unescape(unescape(text)).strip()
+
+
+def _page_meta(html: str, name: str) -> str:
+    found = re.search(rf'<meta[^>]+property="{name}"[^>]*content="([^"]*)"', html)
+    return _page_text(found[1]) if found else ""
 
 
 def tiktok_video_details(handle: str, video: dict) -> dict | None:
-    """Caption and cover from TikTok's official oEmbed. None if the video belongs to someone else."""
-    link = f"https://www.tiktok.com/@{handle}/video/{video['id']}"
-    data = http("GET", TIKTOK_OEMBED_URL.format(urllib.parse.quote(link, safe="")), headers={"User-Agent": BROWSER_UA})
-    if str(data.get("author_unique_id", "")).lower() != handle.lower():
+    """The video's link and full caption. None only if its urlebird page names another account.
+
+    The list already has a short caption, the cover and the counts, so a page that can't be read
+    or doesn't say something only makes the caption shorter. It must never cost a post.
+    """
+    details = {**video, "url": f"https://www.tiktok.com/@{handle}/video/{video['id']}"}
+    try:
+        # A link can hold the caption in any script, and may or may not be percent-encoded already.
+        html = _urlebird_page(URLEBIRD_VIDEO_URL.format(urllib.parse.quote(video.get("page") or video["id"], safe="%")))
+    except (HttpError, urllib.error.URLError, TimeoutError, ValueError) as e:
+        warn(f"TikTok @{handle}: using the short caption, the video's page isn't answering ({e})")
+        return details
+    author = re.search(r"\(@([\w.]+)\)$", _page_meta(html, "og:description"))
+    if author and author[1].lower() != handle.lower():
         return None
-    return {**video, "caption": data.get("title") or "", "cover": data.get("thumbnail_url") or "", "url": link}
+    return {**details, "caption": _page_meta(html, "og:title") or video.get("caption") or ""}
 
 
 def tiktok_profile(handle: str) -> dict:
@@ -726,19 +752,14 @@ def announce_videos(config: TikTokConfig, entry: dict, account: str, videos: lis
                 continue
             try:
                 described = details(video)
-            except HttpError as e:
-                if 400 <= e.status < 500 and e.status != 429:
-                    unsettled.discard(video["id"])  # removed or private: nothing to show
-                    continue
-                warn(f"TikTok @{account}: {e} (trying again later)")
-                continue
-            except (urllib.error.URLError, TimeoutError, ValueError) as e:
+            except (HttpError, urllib.error.URLError, TimeoutError, ValueError) as e:
                 warn(f"TikTok @{account}: {e} (trying again later)")
                 continue
             if described:
                 chosen.append(described)
-            else:
-                unsettled.discard(video["id"])  # someone else's video on the page
+            else:  # the one way a new video goes unposted, so it always leaves a trace in the log
+                warn(f"TikTok @{account}: skipping video {video['id']}, it belongs to another account")
+                unsettled.discard(video["id"])
         if len(chosen) == MAX_POSTS_PER_CHECK:  # older extras, never looked at, count as seen without a post
             oldest_chosen = min(video.get("created") or 0 for video in chosen)
             unsettled -= {video["id"] for video in new if (video.get("created") or 0) < oldest_chosen}
@@ -805,10 +826,10 @@ def check_tiktok(config: TikTokConfig, state: dict, webhook: Webhook, now: datet
                  list_videos=urlebird_videos, details=tiktok_video_details) -> list[str]:
     """Announce new TikTok posts. Accounts are looked at about every TIKTOK_EVERY minutes.
 
-    New videos are found through urlebird and described through TikTok's oEmbed, so each post shows
-    the caption, cover and a direct link. Accounts connected to TikTok's official API (optional,
-    through the panel Worker) use that instead. If neither works, the video count on the public
-    profile page still tells that something new was uploaded.
+    New videos are found and described through urlebird, so each post shows the caption, cover,
+    counts and a direct link. Accounts connected to TikTok's official API (optional, through the
+    panel Worker) use that instead. If neither works, the video count on the public profile page
+    still tells that something new was uploaded.
     """
     entries: dict[str, dict] = state.setdefault("tiktok", {})
     wanted = {account.lower(): account for account in config.accounts}
@@ -817,6 +838,7 @@ def check_tiktok(config: TikTokConfig, state: dict, webhook: Webhook, now: datet
             del entries[handle]
     due = force or tiktok_due(now)
     changes: list[str] = []
+    unexpected = None
     for handle, account in wanted.items():
         if not due and handle in entries:
             continue
@@ -836,8 +858,13 @@ def check_tiktok(config: TikTokConfig, state: dict, webhook: Webhook, now: datet
         else:
             describe = lambda video, handle=handle: details(handle, video)
             entry = entries.setdefault(handle, {})
-            refresh_tiktok_stats(entry, account, listed, webhook, now, describe)
-            changes += announce_videos(config, entry, account, listed, webhook, details=describe, now=now)
+            try:
+                refresh_tiktok_stats(entry, account, listed, webhook, now, describe)
+                changes += announce_videos(config, entry, account, listed, webhook, details=describe, now=now)
+            except ConfigError:
+                raise
+            except Exception as e:  # noqa: BLE001 - one odd video must not cost the other accounts their check
+                unexpected = unexpected or e
             continue
         try:
             profile = fetch(handle)
@@ -863,6 +890,8 @@ def check_tiktok(config: TikTokConfig, state: dict, webhook: Webhook, now: datet
             if "seen" in entry:  # once the video list is back, don't announce these uploads a second time
                 entry["lite_announced_at"] = iso(now)
         entry["video_count"] = profile["video_count"]  # also follows deleted videos down
+    if unexpected:
+        raise unexpected  # now that everyone was checked: it fails the run, so the owner hears of it
     return changes
 
 
@@ -979,9 +1008,10 @@ def main() -> int:
     follow_webhook_changes(state)
     exit_code = 0
     changes: list[str] = []
-    # Checks started by hand or by a config change look at TikTok right away; the 5-minute timer doesn't.
+    # Only the 5-minute timer keeps to the quarter hours. Everything else looks at TikTok right away:
+    # GitHub's backup schedule starts at no predictable minute and may be all that is left running.
     source = os.environ.get("RUN_SOURCE") or os.environ.get("GITHUB_EVENT_NAME", "")
-    force_tiktok = source in ("manual", "push", "workflow_dispatch")
+    force_tiktok = source in ("manual", "push", "workflow_dispatch", "schedule")
     for run in (lambda: run_twitch(config, state, now), lambda: run_tiktok(config, state, now, force_tiktok)):
         try:
             changes += run()

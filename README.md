@@ -81,9 +81,9 @@ Twitch's Watch Stream button.
 - **TikTok:** TikTok hides its video lists from data-centre IPs like GitHub's. Lil Nao therefore reads
   each account's recent videos from [urlebird.com](https://urlebird.com), a public TikTok viewer,
   about every 15 minutes.
-  - For each new video it asks TikTok's official oEmbed endpoint for the caption and cover. oEmbed
-    also confirms that the video belongs to the right account, so videos of other accounts that
-    show up on the page are never announced.
+  - Each video on that page names its author, so videos of other accounts that show up there are
+    never announced. The cover comes from the same page and the full caption from the video's own
+    page. If that second page can't be read, the post goes out with the short caption instead.
   - It posts at most 3 videos per check.
   - Under the cover, a post shows the video's likes and comments (from urlebird's page). A brand-new
     video has hardly any yet, so the post is updated 1, 3, 6 and 24 hours after it went up. The
