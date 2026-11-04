@@ -219,11 +219,11 @@
           "id": "7704330226909596961",
           "message_id": "1567554196155400223",
           "posted_at": "2026-11-04T15:00:37+00:00",
-          "refreshes": 0,
+          "refreshes": 1,
           "stats": {
-            "comments": 3,
-            "likes": 4,
-            "views": 4
+            "comments": 5,
+            "likes": 12,
+            "views": 110
           }
         }
       ],
