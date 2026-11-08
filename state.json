@@ -255,25 +255,14 @@
     "wwm_eldravn": {
       "posted": [
         {
-          "id": "7705504164037627168",
-          "message_id": "1568701821550338119",
-          "posted_at": "2026-11-07T19:00:33+00:00",
-          "refreshes": 4,
-          "stats": {
-            "comments": 5,
-            "likes": 18,
-            "views": 155
-          }
-        },
-        {
           "id": "7705868041153776929",
           "message_id": "1569055701496631370",
           "posted_at": "2026-11-08T18:26:46+00:00",
-          "refreshes": 0,
+          "refreshes": 1,
           "stats": {
-            "comments": 0,
-            "likes": 0,
-            "views": 0
+            "comments": 3,
+            "likes": 4,
+            "views": 40
           }
         }
       ],
