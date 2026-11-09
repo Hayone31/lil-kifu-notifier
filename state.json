@@ -246,22 +246,22 @@
           "id": "7705868041153776929",
           "message_id": "1569055701496631370",
           "posted_at": "2026-11-08T18:26:46+00:00",
-          "refreshes": 3,
+          "refreshes": 4,
           "stats": {
-            "comments": 3,
-            "likes": 11,
-            "views": 113
+            "comments": 4,
+            "likes": 14,
+            "views": 251
           }
         },
         {
           "id": "7706220748146232609",
           "message_id": "1569400247690600659",
           "posted_at": "2026-11-09T17:15:53+00:00",
-          "refreshes": 0,
+          "refreshes": 1,
           "stats": {
-            "comments": 0,
-            "likes": 0,
-            "views": 0
+            "comments": 1,
+            "likes": 3,
+            "views": 30
           }
         }
       ],
