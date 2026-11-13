@@ -235,11 +235,11 @@
           "id": "7707257373932490016",
           "message_id": "1570414447586189414",
           "posted_at": "2026-11-12T12:25:58+00:00",
-          "refreshes": 3,
+          "refreshes": 4,
           "stats": {
             "comments": 2,
-            "likes": 19,
-            "views": 211
+            "likes": 24,
+            "views": 221
           }
         },
         {
@@ -257,11 +257,11 @@
           "id": "7707609973521485089",
           "message_id": "1570759159174135892",
           "posted_at": "2026-11-13T11:15:43+00:00",
-          "refreshes": 0,
+          "refreshes": 1,
           "stats": {
-            "comments": 0,
-            "likes": 0,
-            "views": 17
+            "comments": 1,
+            "likes": 7,
+            "views": 96
           }
         }
       ],
