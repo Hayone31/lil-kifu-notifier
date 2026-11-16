@@ -41,11 +41,11 @@
           "id": "7708822464893062432",
           "message_id": "1571940696401641605",
           "posted_at": "2026-11-16T17:30:46+00:00",
-          "refreshes": 0,
+          "refreshes": 1,
           "stats": {
-            "comments": 0,
-            "likes": 0,
-            "views": 0
+            "comments": 1,
+            "likes": 2,
+            "views": 25
           }
         }
       ],
