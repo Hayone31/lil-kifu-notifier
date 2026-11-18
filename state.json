@@ -265,17 +265,6 @@
     "wwm_eldravn": {
       "posted": [
         {
-          "id": "7709190526473456928",
-          "message_id": "1572306980809216061",
-          "posted_at": "2026-11-17T17:46:03+00:00",
-          "refreshes": 4,
-          "stats": {
-            "comments": 4,
-            "likes": 14,
-            "views": 269
-          }
-        },
-        {
           "id": "7709486985022410017",
           "message_id": "1572589964028412058",
           "posted_at": "2026-11-18T12:30:39+00:00",
@@ -290,11 +279,11 @@
           "id": "7709556389932207392",
           "message_id": "1572657917910458600",
           "posted_at": "2026-11-18T17:00:39+00:00",
-          "refreshes": 0,
+          "refreshes": 1,
           "stats": {
-            "comments": 0,
-            "likes": 0,
-            "views": 0
+            "comments": 1,
+            "likes": 5,
+            "views": 79
           }
         }
       ],
