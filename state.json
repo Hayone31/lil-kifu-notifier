@@ -67,11 +67,11 @@
           "id": "7709458896460516629",
           "message_id": "1572563536201125889",
           "posted_at": "2026-11-18T10:45:36+00:00",
-          "refreshes": 1,
+          "refreshes": 2,
           "stats": {
             "comments": 2,
-            "likes": 7,
-            "views": 50
+            "likes": 33,
+            "views": 287
           }
         }
       ],
@@ -279,11 +279,11 @@
           "id": "7709486985022410017",
           "message_id": "1572589964028412058",
           "posted_at": "2026-11-18T12:30:39+00:00",
-          "refreshes": 0,
+          "refreshes": 1,
           "stats": {
-            "comments": 0,
-            "likes": 1,
-            "views": 1
+            "comments": 1,
+            "likes": 7,
+            "views": 61
           }
         }
       ],
