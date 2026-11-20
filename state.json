@@ -139,11 +139,11 @@
           "id": "7710315295533042946",
           "message_id": "1573401609009111162",
           "posted_at": "2026-11-20T18:16:00+00:00",
-          "refreshes": 0,
+          "refreshes": 1,
           "stats": {
-            "comments": 0,
-            "likes": 4,
-            "views": 17
+            "comments": 2,
+            "likes": 10,
+            "views": 89
           }
         }
       ],
