@@ -8,11 +8,11 @@
           "id": "7711443094612266272",
           "message_id": "1574499993832783954",
           "posted_at": "2026-11-23T19:00:33+00:00",
-          "refreshes": 3,
+          "refreshes": 4,
           "stats": {
-            "comments": 0,
-            "likes": 9,
-            "views": 221
+            "comments": 6,
+            "likes": 13,
+            "views": 237
           }
         }
       ],
@@ -162,11 +162,11 @@
           "id": "7711796053686717718",
           "message_id": "1574847310159159471",
           "posted_at": "2026-11-24T18:00:48+00:00",
-          "refreshes": 0,
+          "refreshes": 1,
           "stats": {
-            "comments": 1,
-            "likes": 15,
-            "views": 35
+            "comments": 2,
+            "likes": 33,
+            "views": 233
           }
         }
       ],
@@ -291,11 +291,11 @@
           "id": "7711765944833543457",
           "message_id": "1574817158545014807",
           "posted_at": "2026-11-24T16:00:49+00:00",
-          "refreshes": 1,
+          "refreshes": 2,
           "stats": {
             "comments": 1,
-            "likes": 3,
-            "views": 21
+            "likes": 5,
+            "views": 67
           }
         }
       ],
