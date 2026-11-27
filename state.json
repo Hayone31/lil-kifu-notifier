@@ -1,6 +1,19 @@
 {
   "keepalive": "2026-11-20T14:11:05+00:00",
-  "streams": {},
+  "streams": {
+    "38398313": {
+      "game": "Where Winds Meet",
+      "login": "drantain",
+      "message_id": "1575907900508078153",
+      "misses": 0,
+      "missing_since": null,
+      "name": "Drantain",
+      "profile": "https://static-cdn.jtvnw.net/jtv_user_pictures/8add2a0d-d84b-429c-bbbc-d69e72d05d18-profile_image-300x300.png",
+      "started_at": "2026-11-27T16:13:07Z",
+      "stream_id": "319392672359",
+      "title": "em who dis em trying stream TFT"
+    }
+  },
   "tiktok": {
     "arvyss00": {
       "seen": [
